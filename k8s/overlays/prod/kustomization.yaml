@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+images:
+  - name: ghcr.io/PLACEHOLDER/nginx-release
+    newTag: prod_latest
+
+patches:
+  - path: patch-replicas.yaml
+    target:
+      kind: Deployment
+      name: nginx-release

@@ -1,0 +1,120 @@
+name: DEV — CI → Build → Deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true   # latest push to main wins
+
+env:
+  AWS_REGION:   us-east-1
+  CLUSTER_NAME: eks-dev
+  NAMESPACE:    release-app
+  OVERLAY:      k8s/overlays/dev
+
+permissions:
+  contents:      read
+  packages:      write
+  id-token:      write          # OIDC
+  security-events: write
+
+jobs:
+  # ─── Stage 1: CI ─────────────────────────────────────────────────────────────
+  ci:
+    name: CI — lint, test, SAST, secrets
+    uses: ./.github/workflows/_reusable-ci.yml
+    secrets: inherit
+
+  # ─── Stage 2: Build & scan ───────────────────────────────────────────────────
+  build:
+    name: Build & Trivy scan
+    needs: ci
+    uses: ./.github/workflows/_reusable-build.yml
+    with:
+      image_tag: "dev_${{ github.sha }}_v${{ github.run_number }}"
+      env_name:  dev
+    secrets: inherit
+
+  # ─── Stage 3: Deploy to DEV ──────────────────────────────────────────────────
+  deploy:
+    name: Deploy → DEV
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev           # maps to GitHub Environment "dev"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Set image tag in kustomize overlay
+        env:
+          IMAGE_TAG: "dev_${{ github.sha }}_v${{ github.run_number }}"
+          REPO: ${{ github.repository }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          cd ${{ env.OVERLAY }}
+          kustomize edit set image \
+            "ghcr.io/PLACEHOLDER/nginx-release=ghcr.io/${REPO_LOWER}/nginx-release:${IMAGE_TAG}"
+
+      - name: Update ConfigMap with version info
+        env:
+          IMAGE_TAG: "dev_${{ github.sha }}_v${{ github.run_number }}"
+        run: |
+          kubectl create configmap nginx-release-config \
+            --from-literal=APP_VERSION="${IMAGE_TAG}" \
+            --from-literal=BUILD_SHA="${{ github.sha }}" \
+            --from-literal=ENV_NAME="dev" \
+            --from-literal=BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -n ${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply manifests
+        run: kubectl apply -k ${{ env.OVERLAY }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/nginx-release \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=300s
+
+      - name: Get service URL
+        id: url
+        run: |
+          for i in $(seq 1 30); do
+            URL=$(kubectl get svc nginx-release -n ${{ env.NAMESPACE }} \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$URL" ] && break
+            echo "Waiting for LoadBalancer... ($i)"
+            sleep 10
+          done
+          echo "APP_URL=http://${URL}" >> "$GITHUB_ENV"
+          echo "url=http://${URL}"     >> "$GITHUB_OUTPUT"
+
+      # ─── Stage 4: Smoke test ────────────────────────────────────────────────
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh "${{ steps.url.outputs.url }}"
+
+      # ─── Stage 5: DAST — OWASP ZAP ─────────────────────────────────────────
+      - name: DAST — OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target:      ${{ steps.url.outputs.url }}
+          fail_action: false   # report only in DEV; set true in QA/PROD
+
+      - name: Deployment summary
+        run: |
+          echo "### DEV deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag**: \`dev_${{ github.sha }}_v${{ github.run_number }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL**: ${{ steps.url.outputs.url }}"  >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ github.sha }}\`"          >> "$GITHUB_STEP_SUMMARY"

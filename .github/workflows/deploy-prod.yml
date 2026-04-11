@@ -1,0 +1,205 @@
+name: PROD — Promote, Approve & Deploy
+
+# Triggered by creating a git tag: prod_<sha>_v<version>
+# Example: git tag prod_abc1234ef_v1.2.0 && git push origin prod_abc1234ef_v1.2.0
+on:
+  push:
+    tags:
+      - "prod_*"
+
+env:
+  AWS_REGION:   us-east-1
+  CLUSTER_NAME: eks-prod
+  NAMESPACE:    release-app
+  OVERLAY:      k8s/overlays/prod
+
+permissions:
+  contents:      read
+  packages:      write
+  id-token:      write
+  security-events: write
+
+jobs:
+  # ─── Validate tag format ─────────────────────────────────────────────────────
+  validate:
+    name: Validate tag — prod_<sha>_v<version>
+    runs-on: ubuntu-latest
+    outputs:
+      sha:     ${{ steps.parse.outputs.sha }}
+      version: ${{ steps.parse.outputs.version }}
+      qa_tag:  ${{ steps.parse.outputs.qa_tag }}
+
+    steps:
+      - name: Parse tag
+        id: parse
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$GIT_TAG" =~ ^prod_([a-f0-9]+)_(.+)$ ]]; then
+            echo "ERROR: Tag '$GIT_TAG' does not match prod_<sha>_<version>"
+            exit 1
+          fi
+          SHA="${BASH_REMATCH[1]}"
+          VERSION="${BASH_REMATCH[2]}"
+          echo "sha=${SHA}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "qa_tag=qa_${SHA}_${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Promoting SHA=${SHA} as PROD tag ${GIT_TAG}"
+
+      - name: Confirm QA image exists
+        env:
+          REPO:   ${{ github.repository }}
+          QA_TAG: ${{ steps.parse.outputs.qa_tag }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          TOKEN=$(echo "${{ secrets.GITHUB_TOKEN }}" | base64)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/v2/${REPO_LOWER}/nginx-release/manifests/${QA_TAG}")
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: QA image tag '${QA_TAG}' not found in GHCR."
+            echo "A prod tag must correspond to a sha that was first deployed to QA."
+            exit 1
+          fi
+          echo "QA image confirmed: ${QA_TAG}"
+
+  # ─── Manual approval gate (GitHub Environment protection rules) ───────────────
+  # Configure in: Settings → Environments → prod → Required reviewers
+  approve:
+    name: Awaiting PROD approval
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: prod          # <── approval gate lives here
+
+    steps:
+      - name: Approved
+        run: echo "PROD deployment approved by ${{ github.actor }}"
+
+  # ─── Re-tag QA image as PROD ─────────────────────────────────────────────────
+  retag:
+    name: Re-tag QA → PROD image
+    needs: [validate, approve]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull QA image & push as PROD tag
+        env:
+          REPO:      ${{ github.repository }}
+          QA_TAG:    ${{ needs.validate.outputs.qa_tag }}
+          PROD_TAG:  ${{ github.ref_name }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          QA_IMAGE="ghcr.io/${REPO_LOWER}/nginx-release:${QA_TAG}"
+          PROD_IMAGE="ghcr.io/${REPO_LOWER}/nginx-release:${PROD_TAG}"
+
+          docker pull "$QA_IMAGE"
+          docker tag  "$QA_IMAGE" "$PROD_IMAGE"
+          docker push "$PROD_IMAGE"
+
+  # ─── Deploy to PROD ───────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy → PROD
+    needs: [validate, approve, retag]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Capture previous image (for rollback)
+        id: prev
+        run: |
+          # Store current prod image tag before updating
+          PREV=$(kubectl get deployment nginx-release -n ${{ env.NAMESPACE }} \
+                   -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "none")
+          echo "image=${PREV}" >> "$GITHUB_OUTPUT"
+        continue-on-error: true   # first deploy won't have previous
+
+      - name: Configure AWS credentials (OIDC — PROD account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PROD_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Set image in kustomize overlay
+        env:
+          PROD_TAG: ${{ github.ref_name }}
+          REPO:     ${{ github.repository }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          cd ${{ env.OVERLAY }}
+          kustomize edit set image \
+            "ghcr.io/PLACEHOLDER/nginx-release=ghcr.io/${REPO_LOWER}/nginx-release:${PROD_TAG}"
+
+      - name: Update ConfigMap with version info
+        env:
+          PROD_TAG:  ${{ github.ref_name }}
+          PROD_SHA:  ${{ needs.validate.outputs.sha }}
+        run: |
+          kubectl create configmap nginx-release-config \
+            --from-literal=APP_VERSION="${PROD_TAG}" \
+            --from-literal=BUILD_SHA="${PROD_SHA}" \
+            --from-literal=ENV_NAME="prod" \
+            --from-literal=BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -n ${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply manifests
+        run: kubectl apply -k ${{ env.OVERLAY }}
+
+      - name: Wait for rollout
+        id: rollout
+        run: |
+          kubectl rollout status deployment/nginx-release \
+            -n ${{ env.NAMESPACE }} --timeout=300s
+        continue-on-error: true   # catch failure to trigger rollback
+
+      - name: Get service URL
+        id: url
+        run: |
+          for i in $(seq 1 30); do
+            URL=$(kubectl get svc nginx-release -n ${{ env.NAMESPACE }} \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$URL" ] && break
+            sleep 10
+          done
+          echo "url=http://${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        id: smoke
+        run: ./scripts/smoke-test.sh "${{ steps.url.outputs.url }}"
+        continue-on-error: true
+
+      # ─── Rollback if rollout or smoke test failed ───────────────────────────
+      - name: Rollback on failure
+        if: steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure'
+        env:
+          PREV_IMAGE: ${{ steps.prev.outputs.image }}
+        run: |
+          echo "::error::PROD deploy or smoke test failed — rolling back to ${PREV_IMAGE}"
+          ./scripts/rollback.sh \
+            "${{ env.NAMESPACE }}" \
+            "nginx-release" \
+            "${PREV_IMAGE}"
+
+      - name: Fail pipeline if rollback triggered
+        if: steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure'
+        run: exit 1
+
+      - name: Deployment summary
+        run: |
+          echo "### PROD deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag**: \`${{ github.ref_name }}\`"           >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ needs.validate.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL**: ${{ steps.url.outputs.url }}"          >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Approved by**: ${{ github.actor }}"           >> "$GITHUB_STEP_SUMMARY"

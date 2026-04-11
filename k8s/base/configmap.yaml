@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-release-config
+  namespace: release-app
+data:
+  # These values are overwritten by each deploy pipeline via kubectl create configmap --dry-run
+  APP_VERSION: "unknown"
+  BUILD_SHA:   "unknown"
+  ENV_NAME:    "unknown"
+  BUILD_DATE:  "unknown"

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Release Dashboard — ${ENV_NAME}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .card {
+      background: #1a1f2e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 2.5rem;
+      max-width: 720px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+
+    .env-badge {
+      display: inline-block;
+      padding: 0.3rem 1rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 1.2rem;
+    }
+
+    .env-dev  { background: #1e3a5f; color: #63b3ed; border: 1px solid #2b6cb0; }
+    .env-qa   { background: #3d2a00; color: #f6ad55; border: 1px solid #c05621; }
+    .env-prod { background: #1c3a2a; color: #68d391; border: 1px solid #276749; }
+
+    h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .subtitle { color: #718096; font-size: 0.9rem; margin-bottom: 2rem; }
+
+    .version-box {
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 1.2rem 1.5rem;
+      margin-bottom: 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .version-label { color: #718096; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .version-value { font-family: "SFMono-Regular", Consolas, monospace; font-size: 1.1rem; color: #90cdf4; font-weight: 600; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th {
+      background: #2d3748;
+      color: #a0aec0;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.75rem;
+      padding: 0.75rem 1rem;
+      text-align: left;
+    }
+    td { padding: 0.75rem 1rem; border-bottom: 1px solid #2d3748; }
+    tr:last-child td { border-bottom: none; }
+    tr.active-row td { background: rgba(99,179,237,0.06); }
+
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot-active  { background: #68d391; box-shadow: 0 0 6px #68d391; }
+    .dot-idle    { background: #4a5568; }
+
+    .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.82rem; color: #90cdf4; }
+
+    .footer { margin-top: 2rem; color: #4a5568; font-size: 0.78rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+
+    <span class="env-badge env-${ENV_NAME}">${ENV_NAME}</span>
+    <h1>Release Dashboard</h1>
+    <p class="subtitle">Active deployment information for this environment</p>
+
+    <div class="version-box">
+      <div>
+        <div class="version-label">Active Version</div>
+        <div class="version-value">${APP_VERSION}</div>
+      </div>
+      <div style="margin-left:auto; text-align:right;">
+        <div class="version-label">Build SHA</div>
+        <div class="mono">${BUILD_SHA}</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Environment</th>
+          <th>Status</th>
+          <th>Version Tag</th>
+          <th>Build Date</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="active-row">
+          <td><strong>${ENV_NAME}</strong></td>
+          <td><span class="dot dot-active"></span>Active</td>
+          <td class="mono">${APP_VERSION}</td>
+          <td>${BUILD_DATE}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="footer">
+      Built on <strong>${BUILD_DATE}</strong> &nbsp;|&nbsp;
+      SHA <span class="mono">${BUILD_SHA}</span> &nbsp;|&nbsp;
+      <a href="/version" style="color:#4a5568;">version.json</a>
+    </p>
+  </div>
+</body>
+</html>

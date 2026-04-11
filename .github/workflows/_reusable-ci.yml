@@ -1,0 +1,93 @@
+name: Reusable — CI (lint, test, SAST, secrets)
+
+on:
+  workflow_call:
+    outputs:
+      passed:
+        description: "true if all CI checks passed"
+        value: ${{ jobs.ci.outputs.passed }}
+
+jobs:
+  ci:
+    name: CI checks
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.result.outputs.passed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for Gitleaks
+
+      # ── Secret scanning ──────────────────────────────────────────────────────
+      - name: Gitleaks — secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}   # omit for FOSS projects
+
+      # ── SAST ─────────────────────────────────────────────────────────────────
+      - name: Semgrep — SAST scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >
+            p/default
+            p/dockerfile
+            p/nginx
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}   # optional; fine without it
+
+      # ── Nginx config lint ─────────────────────────────────────────────────────
+      - name: Lint nginx.conf
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            nginx:1.25-alpine nginx -t
+
+      # ── Unit tests ────────────────────────────────────────────────────────────
+      - name: Build test image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=test_ci \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg ENV_NAME=test \
+            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t nginx-release:ci-test \
+            ./nginx
+
+      - name: Run unit tests
+        run: |
+          # Start container
+          CID=$(docker run -d -p 18080:80 nginx-release:ci-test)
+          echo "Container: $CID"
+
+          # Wait for nginx to be ready
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:18080/health && break
+            echo "Waiting for nginx... ($i)"
+            sleep 2
+          done
+
+          echo "--- Test: /health returns 200 ---"
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:18080/health)
+          [ "$HTTP" = "200" ] || (echo "FAIL: /health returned $HTTP"; docker stop $CID; exit 1)
+
+          echo "--- Test: /version returns valid JSON ---"
+          VERSION_JSON=$(curl -sf http://localhost:18080/version)
+          echo "$VERSION_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['env']=='test', 'env mismatch'"
+
+          echo "--- Test: index.html contains version string ---"
+          curl -sf http://localhost:18080/ | grep -q "test_ci" || \
+            (echo "FAIL: version not found in index.html"; docker stop $CID; exit 1)
+
+          echo "--- Test: security headers present ---"
+          curl -sI http://localhost:18080/ | grep -q "X-Frame-Options" || \
+            (echo "FAIL: X-Frame-Options header missing"; docker stop $CID; exit 1)
+
+          docker stop $CID
+          echo "All unit tests passed."
+
+      - name: Set result
+        id: result
+        run: echo "passed=true" >> "$GITHUB_OUTPUT"

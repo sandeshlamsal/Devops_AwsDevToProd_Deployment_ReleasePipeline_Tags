@@ -1,0 +1,158 @@
+name: QA — Promote & Deploy
+
+# Triggered by creating a git tag: qa_<sha>_v<version>
+# Example: git tag qa_abc1234ef_v1.2.0 && git push origin qa_abc1234ef_v1.2.0
+on:
+  push:
+    tags:
+      - "qa_*"
+
+env:
+  AWS_REGION:   us-east-1
+  CLUSTER_NAME: eks-qa
+  NAMESPACE:    release-app
+  OVERLAY:      k8s/overlays/qa
+
+permissions:
+  contents:      read
+  packages:      write
+  id-token:      write
+  security-events: write
+
+jobs:
+  # ─── Validate tag format ─────────────────────────────────────────────────────
+  validate:
+    name: Validate tag — qa_<sha>_v<version>
+    runs-on: ubuntu-latest
+    outputs:
+      sha:     ${{ steps.parse.outputs.sha }}
+      version: ${{ steps.parse.outputs.version }}
+      dev_tag: ${{ steps.parse.outputs.dev_tag }}
+
+    steps:
+      - name: Parse tag
+        id: parse
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          # Expected format: qa_<sha>_v<version>  e.g. qa_abc1234ef_v1.2.0
+          if [[ ! "$GIT_TAG" =~ ^qa_([a-f0-9]+)_(.+)$ ]]; then
+            echo "ERROR: Tag '$GIT_TAG' does not match qa_<sha>_<version>"
+            exit 1
+          fi
+          SHA="${BASH_REMATCH[1]}"
+          VERSION="${BASH_REMATCH[2]}"
+          echo "sha=${SHA}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "dev_tag=dev_${SHA}"   >> "$GITHUB_OUTPUT"
+          echo "Promoting SHA=${SHA} as QA tag ${GIT_TAG}"
+
+  # ─── Re-tag dev image as QA ──────────────────────────────────────────────────
+  retag:
+    name: Re-tag dev → QA image
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull dev image & push as QA tag
+        env:
+          REPO:    ${{ github.repository }}
+          DEV_TAG: ${{ needs.validate.outputs.dev_tag }}
+          QA_TAG:  ${{ github.ref_name }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          DEV_IMAGE="ghcr.io/${REPO_LOWER}/nginx-release:${DEV_TAG}"
+          QA_IMAGE="ghcr.io/${REPO_LOWER}/nginx-release:${QA_TAG}"
+
+          echo "Pulling: $DEV_IMAGE"
+          docker pull "$DEV_IMAGE" || \
+            (echo "ERROR: dev image $DEV_IMAGE not found. Was the main-branch pipeline run first?" && exit 1)
+
+          echo "Tagging as: $QA_IMAGE"
+          docker tag "$DEV_IMAGE" "$QA_IMAGE"
+          docker push "$QA_IMAGE"
+
+  # ─── Deploy to QA ────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy → QA
+    needs: [validate, retag]
+    runs-on: ubuntu-latest
+    environment: qa
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — QA account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.QA_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Set image in kustomize overlay
+        env:
+          QA_TAG: ${{ github.ref_name }}
+          REPO:   ${{ github.repository }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          cd ${{ env.OVERLAY }}
+          kustomize edit set image \
+            "ghcr.io/PLACEHOLDER/nginx-release=ghcr.io/${REPO_LOWER}/nginx-release:${QA_TAG}"
+
+      - name: Update ConfigMap with version info
+        env:
+          QA_TAG:  ${{ github.ref_name }}
+          QA_SHA:  ${{ needs.validate.outputs.sha }}
+        run: |
+          kubectl create configmap nginx-release-config \
+            --from-literal=APP_VERSION="${QA_TAG}" \
+            --from-literal=BUILD_SHA="${QA_SHA}" \
+            --from-literal=ENV_NAME="qa" \
+            --from-literal=BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -n ${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply manifests
+        run: kubectl apply -k ${{ env.OVERLAY }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/nginx-release \
+            -n ${{ env.NAMESPACE }} --timeout=300s
+
+      - name: Get service URL
+        id: url
+        run: |
+          for i in $(seq 1 30); do
+            URL=$(kubectl get svc nginx-release -n ${{ env.NAMESPACE }} \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$URL" ] && break
+            sleep 10
+          done
+          echo "url=http://${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh "${{ steps.url.outputs.url }}"
+
+      - name: DAST — OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target:      ${{ steps.url.outputs.url }}
+          fail_action: true    # fail the pipeline if active alerts found in QA
+
+      - name: Deployment summary
+        run: |
+          echo "### QA deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag**: \`${{ github.ref_name }}\`"      >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ needs.validate.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL**: ${{ steps.url.outputs.url }}"    >> "$GITHUB_STEP_SUMMARY"
