@@ -1,3 +1,17 @@
+# ─── KMS key for EKS secrets encryption (CKV_AWS_58) ─────────────────────────
+resource "aws_kms_key" "eks_secrets" {
+  description             = "EKS secrets encryption key — ${var.cluster_name}"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = var.tags
+}
+
+resource "aws_kms_alias" "eks_secrets" {
+  name          = "alias/${var.cluster_name}-secrets"
+  target_key_id = aws_kms_key.eks_secrets.key_id
+}
+
 # ─── Cluster IAM Role ─────────────────────────────────────────────────────────
 resource "aws_iam_role" "cluster" {
   name = "${var.cluster_name}-cluster-role"
@@ -22,6 +36,8 @@ resource "aws_iam_role_policy_attachment" "cluster_policy" {
 # ─── EKS Cluster ──────────────────────────────────────────────────────────────
 # Public endpoint required for GitHub Actions OIDC; access restricted via public_access_cidrs.
 resource "aws_eks_cluster" "main" { # nosemgrep: terraform.lang.security.eks-public-endpoint-enabled.eks-public-endpoint-enabled
+  #checkov:skip=CKV_AWS_39:Public endpoint required for GitHub Actions OIDC — private-only blocks CI
+  #checkov:skip=CKV_AWS_38:GitHub Actions runners use dynamic IPs; CIDR restriction not feasible
   name     = var.cluster_name
   role_arn = aws_iam_role.cluster.arn
   version  = var.kubernetes_version
@@ -38,8 +54,16 @@ resource "aws_eks_cluster" "main" { # nosemgrep: terraform.lang.security.eks-pub
     authentication_mode = "API_AND_CONFIG_MAP"
   }
 
-  # CloudWatch logging — audit + API logs always on; others configurable
-  enabled_cluster_log_types = ["api", "audit", "authenticator"]
+  # All 5 control-plane log types enabled (CKV_AWS_37)
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+
+  # KMS encryption for Kubernetes secrets at rest (CKV_AWS_58)
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
+    resources = ["secrets"]
+  }
 
   tags = var.tags
 
