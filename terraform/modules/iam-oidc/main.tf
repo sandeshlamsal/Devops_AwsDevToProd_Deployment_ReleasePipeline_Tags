@@ -102,6 +102,7 @@ resource "aws_iam_policy" "terraform_infra" {
         Sid    = "IAMManagement"
         Effect = "Allow"
         Action = [ # nosemgrep: terraform.lang.security.iam.no-iam-priv-esc-funcs.no-iam-priv-esc-funcs,terraform.lang.security.iam.no-iam-resource-exposure.no-iam-resource-exposure
+          "iam:CreateServiceLinkedRole",
           "iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
           "iam:AttachRolePolicy", "iam:DetachRolePolicy",
           "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
@@ -140,7 +141,7 @@ resource "aws_iam_policy" "terraform_infra" {
         Action = [
           "logs:CreateLogGroup", "logs:DeleteLogGroup",
           "logs:DescribeLogGroups", "logs:PutRetentionPolicy",
-          "logs:TagLogGroup", "logs:ListTagsLogGroup",
+          "logs:TagLogGroup", "logs:ListTagsLogGroup", "logs:ListTagsForResource",
         ]
         Resource = "*"
       },
