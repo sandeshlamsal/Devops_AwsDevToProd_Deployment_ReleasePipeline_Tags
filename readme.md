@@ -601,6 +601,115 @@ curl -I http://<nlb-hostname>/
 
 ---
 
+## Teardown — Destroying All Resources
+
+> Everything created by this pipeline is reversible. Run teardown after end-to-end testing to avoid ongoing costs.
+
+### What gets created and how it is destroyed
+
+| Resource | Created by | Destroyed by |
+|---|---|---|
+| S3 state bucket | `bootstrap.sh` (local) | `teardown.sh` step 3 (local) |
+| GitHub Actions OIDC provider | `bootstrap.sh` → `terraform apply` | `teardown.sh` step 2 → `terraform destroy` |
+| IAM role `GitHubActionsRole-dev` + policies | `bootstrap.sh` → `terraform apply` | `teardown.sh` step 2 → `terraform destroy` |
+| VPC, subnets, NAT gateway | `terraform-dev.yml` (GitHub Actions) | `teardown.sh` step 2 → `terraform destroy` |
+| EKS cluster `eks-dev` | `terraform-dev.yml` (GitHub Actions) | `teardown.sh` step 2 → `terraform destroy` |
+| EKS node group (SPOT instances) | `terraform-dev.yml` (GitHub Actions) | `teardown.sh` step 2 → `terraform destroy` |
+| EKS access entry | `terraform-dev.yml` (GitHub Actions) | `teardown.sh` step 2 → `terraform destroy` |
+| CloudWatch log groups | `terraform-dev.yml` (GitHub Actions) | `teardown.sh` step 2 → `terraform destroy` |
+| Namespace `release-app` | `deploy-dev.yml` (GitHub Actions) | `teardown.sh` step 1 → `kubectl delete namespace` |
+| Deployment, Service, ConfigMap, Secret | `deploy-dev.yml` (GitHub Actions) | `teardown.sh` step 1 (deleted with namespace) |
+| AWS NLB (LoadBalancer service) | `deploy-dev.yml` → K8s Service | `teardown.sh` step 1 — **must delete before EKS or NLB orphans** |
+| GitHub Environments | `terraform-github.yml` (GitHub Actions) | Manual (repo Settings) or set reviewer lists to `[]` |
+| GHCR images | `_reusable-build.yml` (GitHub Actions) | Manual (GitHub → Packages) |
+
+### Why teardown runs locally
+
+The `terraform destroy` removes the IAM OIDC role that GitHub Actions uses to authenticate. Once that role is gone, no workflow can run. Teardown is therefore the **one permitted local operation** in this repo — every other change goes through CI.
+
+### Teardown order — critical
+
+```
+1. kubectl delete namespace release-app    ← removes NLB cleanly before EKS is gone
+        │
+        ▼
+2. terraform destroy                       ← destroys EKS, VPC, IAM roles, OIDC provider
+        │                                    (~10 min)
+        ▼
+3. Delete S3 state bucket                  ← emptied (all versions) then deleted
+        │
+        ▼
+4. Manual: delete GHCR images              ← GitHub → Packages → nginx-release
+5. Manual: delete GitHub Environments      ← repo Settings → Environments (optional)
+```
+
+> **Do not skip step 1.** If EKS is destroyed before the LoadBalancer Service is deleted, the AWS NLB becomes an orphan — Terraform cannot delete it and it will keep billing.
+
+### Run teardown
+
+```bash
+# DEV
+AWS_PROFILE=dev-admin ./scripts/teardown.sh dev 648426766457
+
+# QA (when ready)
+AWS_PROFILE=qa-admin  ./scripts/teardown.sh qa  506250256146
+
+# PROD (when ready)
+AWS_PROFILE=prod-admin ./scripts/teardown.sh prod 429429082896
+```
+
+The script:
+1. Confirms you typed the environment name before doing anything destructive
+2. Verifies your AWS identity matches the target account
+3. Updates kubeconfig → deletes namespace `release-app` (triggers NLB cleanup, waits 30s)
+4. Runs `terraform init -reconfigure` + `terraform destroy -auto-approve`
+5. Empties all object versions from the S3 bucket then deletes it
+
+### Manual cleanup after teardown
+
+**GHCR images** — GitHub Actions pushes one image per deploy. Delete them all at once:
+
+```
+https://github.com/sandeshlamsal?tab=packages
+→ nginx-release → Package settings → Delete this package
+```
+
+Or delete individual tags via the GitHub UI under each package version.
+
+**GitHub Environments** — these are lightweight and cost nothing; leave them for reuse. To remove:
+
+```bash
+# Set all reviewer lists to [] in terraform/github/terraform.tfvars, push to main
+# terraform-github.yml will update the environments automatically.
+# Or delete manually: repo → Settings → Environments → Delete environment
+```
+
+**CloudWatch log groups** — if `terraform destroy` does not remove them (can happen on EKS 1.29):
+
+```bash
+aws logs describe-log-groups \
+  --log-group-name-prefix /aws/eks/eks-dev \
+  --region us-east-1 \
+  --query 'logGroups[].logGroupName' \
+  --output text | tr '\t' '\n' | \
+xargs -I{} aws logs delete-log-group --log-group-name {} --region us-east-1
+```
+
+### Cost while running
+
+| Resource | Approx cost (us-east-1) |
+|---|---|
+| EKS cluster control plane | ~$0.10 / hr |
+| 1× t3.small SPOT node | ~$0.005 / hr |
+| NAT gateway | ~$0.045 / hr + data |
+| NLB (LoadBalancer service) | ~$0.008 / hr + LCU |
+| S3 state bucket | < $0.01 / month |
+| **Total DEV (running)** | **~$0.16 / hr (~$3.84 / day)** |
+
+Teardown brings the cost to **$0.00** — nothing runs outside the cluster.
+
+---
+
 ## QA Environment Setup
 
 > _Coming soon. QA setup follows the same pattern but is triggered by `qa_*` git tags._
