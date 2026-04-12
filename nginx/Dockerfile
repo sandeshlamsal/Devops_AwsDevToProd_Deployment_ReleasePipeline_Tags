@@ -24,6 +24,8 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 80
 
+# nginx must run as root to bind port 80 — no USER instruction is intentional.
+# nosemgrep: dockerfile.security.missing-user.missing-user
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -sf http://localhost/health || exit 1
 

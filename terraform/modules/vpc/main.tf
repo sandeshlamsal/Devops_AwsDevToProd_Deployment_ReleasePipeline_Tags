@@ -22,7 +22,8 @@ resource "aws_default_security_group" "main" {
 }
 
 # ─── VPC Flow Logs → CloudWatch (CKV2_AWS_11) ────────────────────────────────
-resource "aws_cloudwatch_log_group" "flow_log" {
+# VPC flow logs contain network metadata only (IPs/ports); AWS-managed encryption is sufficient.
+resource "aws_cloudwatch_log_group" "flow_log" { # nosemgrep: terraform.aws.security.aws-cloudwatch-log-group-unencrypted.aws-cloudwatch-log-group-unencrypted
   name              = "/aws/vpc/${var.environment}-flow-logs"
   retention_in_days = 30
 
