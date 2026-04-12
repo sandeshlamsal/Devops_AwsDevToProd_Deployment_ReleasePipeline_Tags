@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
@@ -12,13 +12,14 @@ terraform {
     }
   }
 
-  # Pre-create this S3 bucket + DynamoDB lock table before running terraform init
+  # Pre-create this S3 bucket before running terraform init (see scripts/bootstrap.sh)
+  # Locking uses S3 native conditional writes (Terraform >= 1.10, no DynamoDB needed)
   backend "s3" {
-    bucket         = "tfstate-nginx-release-dev-648426766457"
-    key            = "eks/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "tfstate-lock-dev"
+    bucket       = "tfstate-nginx-release-dev-648426766457"
+    key          = "eks/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 

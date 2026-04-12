@@ -2,8 +2,11 @@
 # bootstrap.sh <env> <account_id> [region]
 #
 # One-time bootstrap per AWS account.
-# Creates the S3 state bucket, DynamoDB lock table, and the GitHub Actions
-# OIDC IAM role — the minimum needed before GitHub Actions can take over.
+# Creates the S3 state bucket and the GitHub Actions OIDC IAM role —
+# the minimum needed before GitHub Actions can take over.
+#
+# State locking uses S3 native conditional writes (Terraform >= 1.10).
+# No DynamoDB table is required.
 #
 # Run this ONCE per environment with temporary admin credentials.
 # All subsequent infrastructure changes must go through GitHub Actions.
@@ -28,12 +31,11 @@ if [ -z "$ENV" ] || [ -z "$ACCOUNT_ID" ]; then
 fi
 
 BUCKET="tfstate-nginx-release-${ENV}-${ACCOUNT_ID}"
-LOCK_TABLE="tfstate-lock-${ENV}"
 TF_DIR="terraform/${ENV}"
 
 echo ""
 echo "Bootstrap: environment=${ENV}  account=${ACCOUNT_ID}  region=${REGION}"
-echo "──────────────────────────────────────────────────────────────────"
+echo "────────────────────────────────────────────────────────────────────────"
 
 # ─── Verify correct AWS account ──────────────────────────────────────────────
 CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -70,21 +72,6 @@ else
   echo "S3 bucket created: $BUCKET"
 fi
 
-# ─── DynamoDB lock table ──────────────────────────────────────────────────────
-if aws dynamodb describe-table --table-name "$LOCK_TABLE" --region "$REGION" 2>/dev/null; then
-  echo "DynamoDB table already exists: $LOCK_TABLE"
-else
-  echo "Creating DynamoDB table: $LOCK_TABLE"
-  aws dynamodb create-table \
-    --table-name "$LOCK_TABLE" \
-    --attribute-definitions AttributeName=LockID,AttributeType=S \
-    --key-schema AttributeName=LockID,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    --region "$REGION"
-  aws dynamodb wait table-exists --table-name "$LOCK_TABLE" --region "$REGION"
-  echo "DynamoDB table created: $LOCK_TABLE"
-fi
-
 # ─── Bootstrap OIDC provider + IAM role via Terraform (one-time) ─────────────
 echo ""
 echo "Running terraform init + apply -target=module.iam_oidc ..."
@@ -96,7 +83,7 @@ terraform init
 terraform apply -target=module.iam_oidc -auto-approve
 
 echo ""
-echo "──────────────────────────────────────────────────────────────────"
+echo "────────────────────────────────────────────────────────────────────────"
 echo "Bootstrap complete for ${ENV}."
 echo ""
 echo "Next steps:"

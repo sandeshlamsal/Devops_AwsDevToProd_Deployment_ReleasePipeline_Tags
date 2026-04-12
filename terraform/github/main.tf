@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     github = {
@@ -9,12 +9,13 @@ terraform {
   }
 
   # Reuse the DEV account S3 bucket with a separate state key
+  # Locking uses S3 native conditional writes (Terraform >= 1.10, no DynamoDB needed)
   backend "s3" {
-    bucket         = "tfstate-nginx-release-dev-648426766457"
-    key            = "github-environments/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "tfstate-lock-dev"
+    bucket       = "tfstate-nginx-release-dev-648426766457"
+    key          = "github-environments/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 

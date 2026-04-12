@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
@@ -12,12 +12,13 @@ terraform {
     }
   }
 
+  # Locking uses S3 native conditional writes (Terraform >= 1.10, no DynamoDB needed)
   backend "s3" {
-    bucket         = "tfstate-nginx-release-qa-506250256146"
-    key            = "eks/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "tfstate-lock-qa"
+    bucket       = "tfstate-nginx-release-qa-506250256146"
+    key          = "eks/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 

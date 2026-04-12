@@ -132,15 +132,6 @@ resource "aws_iam_policy" "terraform_infra" {
         ]
       },
       {
-        Sid    = "TerraformStateLock"
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem", "dynamodb:PutItem",
-          "dynamodb:DeleteItem", "dynamodb:DescribeTable",
-        ]
-        Resource = "arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/tfstate-lock-${var.environment}"
-      },
-      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [
