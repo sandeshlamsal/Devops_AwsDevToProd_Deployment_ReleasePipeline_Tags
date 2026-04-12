@@ -873,3 +873,203 @@ git push origin prod_abc1234ef_v1.2.0
 | No network policy | Add Calico or EKS native network policies |
 | Spot interruption handling | Add AWS Node Termination Handler |
 | Terraform plan in PR comments | Add `actions/github-script` to post plan diff on PR |
+
+---
+
+## Pipeline Failure Log
+
+A chronological record of every CI/CD failure encountered during initial pipeline bring-up, the root cause, and the exact fix applied. Useful for understanding why certain patterns exist in this codebase.
+
+---
+
+### F-01 — Semgrep rule-ID drift between CI and local
+
+**Workflow:** `_reusable-ci.yml` — Semgrep SAST scan  
+**Symptom:** Semgrep passed locally but failed in CI, or suppressed findings in CI that were never flagged locally.  
+**Root cause:** CI used the old `semgrep/semgrep-action@v1` Docker image (pinned to Semgrep ~0.x). Local dev used `semgrep==1.159.0`. The two versions use different rule IDs for the same patterns — a `# nosemgrep: old.rule.id` comment suppresses nothing in the new CLI, and vice versa.  
+**Fix:** Replaced `semgrep/semgrep-action@v1` with:
+```yaml
+- name: Install Semgrep
+  run: pip install semgrep==1.159.0
+
+- name: Semgrep — SAST scan
+  run: semgrep scan --config "p/default" --config "p/dockerfile" --config "p/nginx" --error --no-autofix
+```
+CI and local now run the identical binary, eliminating rule-ID drift permanently.  
+**File:** [.github/workflows/_reusable-ci.yml](.github/workflows/_reusable-ci.yml)
+
+---
+
+### F-02 — `nosemgrep` suppression on the wrong line
+
+**Workflow:** `_reusable-ci.yml` — Semgrep SAST scan  
+**Symptom:** `# nosemgrep: rule.id` comments present but findings still reported.  
+**Root cause:** Semgrep suppresses a finding only when the comment is on the **exact line the finding is reported on**. Comments placed one line above (with a blank line between) or on the wrong resource block had no effect. Specifically, `dockerfile.security.missing-user` was flagged on the `HEALTHCHECK` line, not on a preceding comment line, and `yaml.kubernetes.security.run-as-non-root` was flagged on the inner `spec:` under `template:`, not the outer `spec:`.  
+**Fix:** Moved every `# nosemgrep:` comment to land on the exact flagged line. Used `semgrep scan --json | python3 -c "import sys,json; [print(f['path'],f['start']['line'],f['check_id']) for f in json.load(sys.stdin)['results']]"` to identify exact line numbers before placing comments.  
+**Files:** [nginx/Dockerfile](nginx/Dockerfile), [k8s/overlays/dev/patch-replicas.yaml](k8s/overlays/dev/patch-replicas.yaml)
+
+---
+
+### F-03 — Trivy blocking on `nginx:1.25-alpine` CVEs
+
+**Workflow:** `_reusable-build.yml` — Trivy container scan  
+**Symptom:** Trivy reported CRITICAL CVEs (libxml2, libssl3, libpng) with available fixes.  
+**Root cause:** `nginx:1.25-alpine` is based on Alpine 3.19 which reached end-of-life. Packages in the base image snapshot had known CVEs with published fixes, but `ignore-unfixed: true` does not suppress patched CVEs — only CVEs with no available fix.  
+**Fix (step 1):** Upgraded base image from `nginx:1.25-alpine` → `nginx:1.27-alpine` (Alpine 3.21, actively maintained).  
+**Fix (step 2):** Even on 3.21, the pinned snapshot in the registry can lag behind published security patches. Added `apk upgrade --no-cache` as the first `RUN` instruction so every build pulls the latest patched packages at build time:
+```dockerfile
+RUN apk upgrade --no-cache && \
+    apk add --no-cache gettext curl
+```
+**File:** [nginx/Dockerfile](nginx/Dockerfile)
+
+---
+
+### F-04 — Checkov `#checkov:skip` not suppressing findings
+
+**Workflow:** `terraform-dev.yml` — Checkov IaC scan  
+**Symptom:** `#checkov:skip=CKV2_AWS_11` and `#checkov:skip=CKV2_AWS_12` present on `aws_vpc` but Checkov still flagged them.  
+**Root cause:** Checkov skip annotations must be placed **inside** the resource block (on any line between the opening `{` and closing `}`). Comments placed outside or above the block are ignored.  
+**Fix:** Moved skip comments inside the `aws_vpc` resource block body.  
+**File:** [terraform/modules/vpc/main.tf](terraform/modules/vpc/main.tf)
+
+---
+
+### F-05 — New Checkov findings after adding flow-log + KMS resources
+
+**Workflow:** `terraform-dev.yml` — Checkov IaC scan  
+**Symptom:** After adding VPC flow logs and KMS keys to fix F-04, three new Checkov checks fired.  
+
+| Check | Resource | Requirement |
+|---|---|---|
+| `CKV_AWS_338` | `aws_cloudwatch_log_group` | Retention must be ≥ 365 days |
+| `CKV_AWS_158` | `aws_cloudwatch_log_group` | Log group must be encrypted with a customer KMS key |
+| `CKV2_AWS_64` | `aws_kms_key` | KMS key must have an explicit key policy (not rely on default) |
+
+**Fix:**
+- Set `retention_in_days = 365` on the log group
+- Added a KMS key for flow log encryption with an explicit policy granting access to both the root account and the `logs.<region>.amazonaws.com` service principal with an `ArnLike` condition
+- Added a separate KMS key for EKS secrets encryption with an explicit policy granting access to `eks.amazonaws.com`
+
+**Files:** [terraform/modules/vpc/main.tf](terraform/modules/vpc/main.tf), [terraform/modules/eks/main.tf](terraform/modules/eks/main.tf)
+
+---
+
+### F-06 — `terraform-github.yml` plan output path mismatch
+
+**Workflow:** `terraform-github.yml` — Terraform plan  
+**Symptom:** `cat: terraform/github/plan-output.txt: No such file or directory`  
+**Root cause:** The plan step piped output with `tee plan-output.txt` (relative path = repo root), but the summary step read from `${{ env.TF_DIR }}/plan-output.txt`. Using `-chdir=terraform/github` changes Terraform's working directory but does not change the shell's working directory — `tee` writes relative to the shell CWD (repo root).  
+**Fix:** Changed `tee plan-output.txt` → `tee ${{ env.TF_DIR }}/plan-output.txt` so both write and read use the same absolute-equivalent path.  
+**File:** [.github/workflows/terraform-github.yml](.github/workflows/terraform-github.yml)
+
+---
+
+### F-07 — Shell injection in `_reusable-build.yml`
+
+**Workflow:** `_reusable-build.yml` — Docker build + push  
+**Symptom:** Semgrep flagged `bash-injection` on lines using `${{ github.repository }}` and `${{ inputs.image_tag }}` directly inside `run:` scripts.  
+**Root cause:** GitHub Actions expressions interpolated directly into `run:` shell scripts can be exploited via crafted branch names or input values. This is a real security risk, not just a lint issue.  
+**Fix:** Moved all `${{ ... }}` expressions to an `env:` block and referenced them as shell environment variables:
+```yaml
+env:
+  REPO_RAW:  ${{ github.repository }}
+  IMAGE_TAG: ${{ inputs.image_tag }}
+run: |
+  REPO=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+  IMAGE_REF="ghcr.io/${REPO}/nginx-release:${IMAGE_TAG}"
+```
+**File:** [.github/workflows/_reusable-build.yml](.github/workflows/_reusable-build.yml)
+
+---
+
+### F-08 — `kms:TagResource` AccessDeniedException on first KMS key creation
+
+**Workflow:** `terraform-dev.yml` — Terraform apply  
+**Symptom:**
+```
+AccessDeniedException: User: .../GitHubActionsRole-dev/GitHubActions is not
+authorized to perform: kms:TagResource
+```
+**Root cause:** The `terraform_infra` IAM policy had no KMS permissions at all. When Terraform created the `aws_kms_key` resources (which have `tags = var.tags`), the AWS provider internally calls `kms:TagResource` as part of the create operation.  
+**Fix:** Added a `KMSManagement` statement to the `terraform_infra` IAM policy covering the full set of KMS operations needed to create, manage, alias, grant, and tag keys:
+```hcl
+{
+  Sid    = "KMSManagement"
+  Effect = "Allow"
+  Action = [
+    "kms:CreateKey", "kms:DescribeKey", "kms:EnableKeyRotation",
+    "kms:GetKeyPolicy", "kms:GetKeyRotationStatus",
+    "kms:ListResourceTags", "kms:PutKeyPolicy",
+    "kms:ScheduleKeyDeletion", "kms:TagResource", "kms:UntagResource",
+    "kms:CreateAlias", "kms:DeleteAlias", "kms:ListAliases", "kms:UpdateAlias",
+    "kms:CreateGrant", "kms:ListGrants", "kms:RevokeGrant",
+  ]
+  Resource = "*"
+}
+```
+**File:** [terraform/modules/iam-oidc/main.tf](terraform/modules/iam-oidc/main.tf)
+
+---
+
+### F-09 — Terraform modules applying in parallel, racing IAM policy update
+
+**Workflow:** `terraform-dev.yml` — Terraform apply  
+**Symptom:** Even after adding KMS permissions to the IAM policy (F-08), KMS key creation and EKS cluster creation still failed with `AccessDeniedException` on the *same run* that updated the policy.  
+**Root cause:** Without explicit `depends_on`, Terraform applied `module.iam_oidc`, `module.vpc`, and `module.eks` **in parallel**. The IAM policy update and the KMS/EKS resource creation happened simultaneously — the new permissions were not yet in effect when the parallel modules made their first AWS API calls.  
+**Fix:** Added `depends_on = [module.iam_oidc]` to both `module.vpc` and `module.eks` in all three environment root modules (`dev/main.tf`, `qa/main.tf`, `prod/main.tf`). Terraform now completes the IAM module before starting infrastructure modules.  
+**Files:** [terraform/dev/main.tf](terraform/dev/main.tf), [terraform/qa/main.tf](terraform/qa/main.tf), [terraform/prod/main.tf](terraform/prod/main.tf)
+
+---
+
+### F-10 — `iam:CreateServiceLinkedRole` and `logs:ListTagsForResource` missing
+
+**Workflow:** `terraform-dev.yml` — Terraform apply  
+**Symptom:**
+```
+InvalidParameterException: EKS Cluster Service-Linked Role could not be created —
+ensure caller has permission to perform iam:CreateServiceLinkedRole
+
+AccessDeniedException: not authorized to perform: logs:ListTagsForResource
+```
+**Root cause:**
+- EKS requires `iam:CreateServiceLinkedRole` to create `AWSServiceRoleForAmazonEKS` on first use in an account.
+- Terraform AWS provider v5 replaced the deprecated `logs:ListTagsLogGroup` API with `logs:ListTagsForResource`. The IAM policy only had the old API.
+
+**Fix:** Added both actions to the `IAMManagement` and `CloudWatchLogs` statements respectively.  
+**File:** [terraform/modules/iam-oidc/main.tf](terraform/modules/iam-oidc/main.tf)
+
+---
+
+### F-11 — Bootstrap deadlock: plan fails because permissions are not yet live
+
+**Workflow:** `terraform-dev.yml` — Terraform plan  
+**Symptom:** `Cannot apply incomplete plan` — the apply job received a corrupt plan artifact.  
+**Root cause (two-part):**
+
+**Part A — silent plan failure:** The plan step used `terraform plan ... | tee plan-output.txt`. In bash, a pipe returns the exit code of the *last* command (`tee`), not terraform. When terraform plan failed with `AccessDeniedException`, `tee` still exited 0, the step was marked green, the corrupt `tfplan` artifact was uploaded, and the apply job ran `terraform apply tfplan` against it — producing the misleading "Cannot apply incomplete plan" error instead of a clear plan error.
+
+**Part B — permission deadlock:** `terraform plan` refreshes all resources currently in the Terraform state. The CloudWatch log group (`/aws/vpc/dev-flow-logs`) existed in state from a previous partial apply. Refreshing it requires `logs:ListTagsForResource`. That permission existed in the Terraform code but had never been successfully applied to AWS (every previous apply failed before or during the IAM update). Result: plan always fails → apply never runs → permission never gets applied → plan always fails.
+
+**Fix:**
+1. Added `set -o pipefail` to the plan step so a failing `terraform` process causes the step to fail immediately.
+2. Added a **"Pre-apply IAM permissions"** step *before* the plan step that runs `terraform apply -auto-approve -target=module.iam_oidc`. This pushes all pending IAM changes into AWS before the plan refresh reads existing resources.
+3. Added a **30-second `sleep`** after the pre-apply step because IAM policy changes replicate globally within seconds but can take up to ~30 s to reach all regional service endpoints. Without the sleep, the plan step started 4 seconds after the IAM apply completed and still hit the old policy at the CloudWatch Logs endpoint.
+
+```yaml
+- name: Pre-apply IAM permissions (bootstrap gate)
+  run: |
+    terraform -chdir=${{ env.TF_DIR }} apply \
+      -auto-approve -target=module.iam_oidc -no-color
+
+- name: Wait for IAM propagation
+  run: sleep 30
+
+- name: Terraform plan
+  run: |
+    set -o pipefail
+    terraform -chdir=${{ env.TF_DIR }} plan -no-color -out=tfplan \
+      2>&1 | tee ${{ env.TF_DIR }}/plan-output.txt
+```
+
+**Files:** [.github/workflows/terraform-dev.yml](.github/workflows/terraform-dev.yml), [.github/workflows/terraform-qa.yml](.github/workflows/terraform-qa.yml), [.github/workflows/terraform-prod.yml](.github/workflows/terraform-prod.yml)
