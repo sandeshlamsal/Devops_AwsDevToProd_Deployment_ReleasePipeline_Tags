@@ -93,6 +93,15 @@ jobs:
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_DIR }} init
 
+      # Remove any stale lock left by a previously failed/cancelled run.
+      # The lock file lives at <key>.tflock in the S3 backend bucket.
+      # || true so the step never fails when no lock file exists.
+      - name: Release stale state lock (if any)
+        run: |
+          aws s3 rm \
+            s3://tfstate-nginx-release-dev-648426766457/eks/terraform.tfstate.tflock \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
+
       # Apply the IAM/OIDC module first so that all required permissions (KMS,
       # CreateServiceLinkedRole, logs:ListTagsForResource, etc.) are live in AWS
       # before the plan refresh reads existing resources. Without this, the plan
@@ -170,6 +179,12 @@ jobs:
 
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Release stale state lock (if any)
+        run: |
+          aws s3 rm \
+            s3://tfstate-nginx-release-dev-648426766457/eks/terraform.tfstate.tflock \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
 
       # ONE-TIME migration step: EKS cluster was created at 1.29 (EOL).
       # AWS does not support skipping minor versions, so the cluster must be
