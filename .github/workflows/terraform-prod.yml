@@ -116,18 +116,22 @@ jobs:
       - name: Write plan to job summary
         run: |
           echo "## Terraform Plan — PROD" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                          >> "$GITHUB_STEP_SUMMARY"
           echo '```terraform'              >> "$GITHUB_STEP_SUMMARY"
-          cat plan-output.txt             >> "$GITHUB_STEP_SUMMARY"
-          echo '```'                      >> "$GITHUB_STEP_SUMMARY"
+          cat ${{ env.TF_DIR }}/plan-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                       >> "$GITHUB_STEP_SUMMARY"
+          echo ""                          >> "$GITHUB_STEP_SUMMARY"
+          echo "> Review the plan above, then approve the **Terraform apply — PROD** job to apply." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-prod-${{ github.sha }}
+          name: tfplan-prod-${{ github.run_id }}
           path: |
             ${{ env.TF_DIR }}/tfplan
             ${{ env.TF_DIR }}/plan-output.txt
-          retention-days: 30
+          retention-days: 7
 
   # ─── Apply — requires human approval via "prod-terraform" environment ──────
   apply:
@@ -155,7 +159,7 @@ jobs:
       - name: Download approved plan artifact
         uses: actions/download-artifact@v4
         with:
-          name: tfplan-prod-${{ github.sha }}
+          name: tfplan-prod-${{ github.run_id }}
           path: ${{ env.TF_DIR }}
 
       - name: Terraform init
@@ -166,6 +170,8 @@ jobs:
 
       - name: Apply summary
         run: |
-          echo "### PROD infrastructure updated" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **SHA**: \`${{ github.sha }}\`"  >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Approved by**: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### PROD infrastructure applied"               >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ github.sha }}\`"              >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Approved by**: ${{ github.actor }}"        >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run**: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            >> "$GITHUB_STEP_SUMMARY"

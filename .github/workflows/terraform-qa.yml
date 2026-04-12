@@ -1,13 +1,16 @@
 name: Terraform — QA
 
 # ── Trigger ───────────────────────────────────────────────────────────────────
-# PRs:        fmt + validate + checkov
-# Push main:  plan → apply (OIDC role, QA account, requires manual approval)
+# PRs:           lint + validate + checkov  (no AWS access)
+# Push to main:  plan → [approval gate] → apply
+# workflow_dispatch:
+#   action=plan  → plan only (stop before approval gate)
+#   action=apply → plan → [approval gate] → apply
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "plan = dry run only | apply = plan + apply (requires approval)"
+        description: "plan = show changes only | apply = plan then request approval to apply"
         required: true
         default: apply
         type: choice
@@ -35,8 +38,9 @@ permissions:
   pull-requests: write
 
 jobs:
+  # ─── Job 1: Static checks — no AWS credentials needed ─────────────────────
   lint-and-scan:
-    name: Fmt · Validate · Security scan
+    name: Fmt · Validate · Checkov
     runs-on: ubuntu-latest
 
     steps:
@@ -49,7 +53,7 @@ jobs:
       - name: Terraform fmt check
         run: terraform -chdir=${{ env.TF_DIR }} fmt -check -recursive
 
-      - name: Terraform init (local only)
+      - name: Terraform init (local — no backend)
         run: terraform -chdir=${{ env.TF_DIR }} init -backend=false
 
       - name: Terraform validate
@@ -73,18 +77,17 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '### Terraform QA — lint passed\nfmt ✅  validate ✅  checkov ✅\n\nMerge to `main` to trigger `plan → apply` (requires QA-terraform approval).'
+              body: '### Terraform QA — lint passed\nfmt ✅  validate ✅  checkov ✅\n\nMerge to `main` to trigger `plan → [approval gate] → apply`.'
             });
 
-  # ─── Requires manual approval via GitHub Environment "qa-terraform" ────────
-  plan-and-apply:
-    name: Plan & Apply → QA
+  # ─── Job 2: Terraform plan ────────────────────────────────────────────────
+  plan:
+    name: Terraform plan — QA
     needs: lint-and-scan
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: qa-terraform     # configure Required reviewers in GitHub Settings
 
     steps:
       - uses: actions/checkout@v4
@@ -107,15 +110,67 @@ jobs:
           terraform -chdir=${{ env.TF_DIR }} plan \
             -no-color \
             -out=tfplan \
-            | tee plan-output.txt
+            2>&1 | tee plan-output.txt
 
-      - name: Terraform apply
-        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+      - name: Write plan to job summary
+        run: |
+          echo "## Terraform Plan — QA"  >> "$GITHUB_STEP_SUMMARY"
+          echo ""                         >> "$GITHUB_STEP_SUMMARY"
+          echo '```terraform'             >> "$GITHUB_STEP_SUMMARY"
+          cat ${{ env.TF_DIR }}/plan-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                      >> "$GITHUB_STEP_SUMMARY"
+          echo ""                         >> "$GITHUB_STEP_SUMMARY"
+          echo "> Review the plan above, then approve the **Terraform apply — QA** job to apply." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-qa-${{ github.sha }}
-          path: ${{ env.TF_DIR }}/plan-output.txt
-          retention-days: 30
+          name: tfplan-qa-${{ github.run_id }}
+          path: |
+            ${{ env.TF_DIR }}/tfplan
+            ${{ env.TF_DIR }}/plan-output.txt
+          retention-days: 7
+
+  # ─── Job 3: Approval gate then apply ──────────────────────────────────────
+  apply:
+    name: Terraform apply — QA
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: qa-terraform    # ← configure Required reviewers here
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — QA account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.QA_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Download approved plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-qa-${{ github.run_id }}
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform apply (approved plan only — no re-plan)
+        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+
+      - name: Apply summary
+        run: |
+          echo "### QA infrastructure applied"                >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ github.sha }}\`"             >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Approved by**: ${{ github.actor }}"       >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run**: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            >> "$GITHUB_STEP_SUMMARY"
