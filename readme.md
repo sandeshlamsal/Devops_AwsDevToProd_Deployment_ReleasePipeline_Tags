@@ -289,14 +289,67 @@ GitHub Actions jobs that declare `environment:` receive a different OIDC subject
 |---|---|---|
 | Terraform | 1.10.0 | `terraform version` |
 | AWS CLI | v2 | `aws --version` |
-| AWS credentials | Admin in account `648426766457` | `aws sts get-caller-identity` |
+| AWS credentials | Admin in account `648426766457` via SSO | `aws sts get-caller-identity --profile dev-admin` |
+
+---
+
+### Step 0 — Configure AWS SSO access (one-time per machine)
+
+This pipeline uses **AWS IAM Identity Center (SSO)** — no long-lived access keys. Sessions are time-limited, centrally audited, and revokable from the Control Tower master account.
+
+#### 0a — Set up IAM Identity Center (in the AWS Console, master account `810426675067`)
+
+1. Open **IAM Identity Center → Users** — confirm your user exists or create one
+2. Open **Permission sets → Create permission set** → choose `AdministratorAccess` (AWS managed) → name it `AdministratorAccess`
+3. Open **AWS accounts** → select `648426766457` (DEV) → **Assign users or groups** → assign your user with the `AdministratorAccess` permission set
+4. Note your **SSO start URL** from IAM Identity Center → **Dashboard** (format: `https://d-xxxxxxxxxx.awsapps.com/start`)
+
+#### 0b — Add SSO profiles to `~/.aws/config`
+
+Add the following (replace the `sso_start_url` with yours):
+
+```ini
+[sso-session nginx-pipeline]
+sso_start_url            = https://d-xxxxxxxxxx.awsapps.com/start
+sso_region               = us-east-1
+sso_registration_scopes  = sso:account:access
+
+[profile dev-admin]
+sso_session     = nginx-pipeline
+sso_account_id  = 648426766457
+sso_role_name   = AdministratorAccess
+region          = us-east-1
+output          = json
+```
+
+> QA and PROD profiles (`qa-admin`, `prod-admin`) follow the same pattern with their account IDs — add them when you reach those environments.
+
+#### 0c — Log in and verify
+
+```bash
+# Log in (opens browser, token lasts 8–12 hours)
+aws sso login --sso-session nginx-pipeline
+
+# Verify you are in the DEV account
+aws sts get-caller-identity --profile dev-admin
+```
+
+Expected output:
+```json
+{
+    "Account": "648426766457",
+    "Arn": "arn:aws:sts::648426766457:assumed-role/AWSReservedSSO_AdministratorAccess_.../..."
+}
+```
+
+> Run `aws sso login --sso-session nginx-pipeline` at the start of each working session. The SSO token is shared across all profiles that reference the same `sso-session`.
 
 ---
 
 ### Step 1 — Run bootstrap (local, one-time)
 
 ```bash
-./scripts/bootstrap.sh dev 648426766457
+AWS_PROFILE=dev-admin ./scripts/bootstrap.sh dev 648426766457
 ```
 
 The script:
