@@ -1,13 +1,16 @@
 name: Terraform — DEV
 
 # ── Trigger ───────────────────────────────────────────────────────────────────
-# PRs:        fmt + validate + checkov (no AWS access — safe for forks)
-# Push main:  plan → apply (OIDC role, DEV account)
+# PRs:           lint + validate + checkov  (no AWS access)
+# Push to main:  plan → [approval gate] → apply
+# workflow_dispatch:
+#   action=plan  → plan only (stop before approval gate)
+#   action=apply → plan → [approval gate] → apply
 on:
-  workflow_dispatch:       # ← manual trigger from GitHub Actions UI
+  workflow_dispatch:
     inputs:
       action:
-        description: "plan = dry run only | apply = plan + apply"
+        description: "plan = show changes only | apply = plan then request approval to apply"
         required: true
         default: apply
         type: choice
@@ -25,19 +28,19 @@ on:
       - "terraform/modules/**"
 
 env:
-  TF_DIR:        terraform/dev
-  AWS_REGION:    us-east-1
-  TF_VERSION:    "~1.6"
+  TF_DIR:     terraform/dev
+  AWS_REGION: us-east-1
+  TF_VERSION: "~1.6"
 
 permissions:
   contents:      read
-  id-token:      write        # OIDC (apply job only)
-  pull-requests: write        # post plan comment
+  id-token:      write        # OIDC
+  pull-requests: write        # post plan comment on PRs
 
 jobs:
-  # ─── PR: static checks (no AWS credentials needed) ────────────────────────
+  # ─── Job 1: Static checks — no AWS credentials needed ─────────────────────
   lint-and-scan:
-    name: Fmt · Validate · Security scan
+    name: Fmt · Validate · Checkov
     runs-on: ubuntu-latest
 
     steps:
@@ -50,7 +53,7 @@ jobs:
       - name: Terraform fmt check
         run: terraform -chdir=${{ env.TF_DIR }} fmt -check -recursive
 
-      - name: Terraform init (local only — no backend)
+      - name: Terraform init (local — no backend)
         run: terraform -chdir=${{ env.TF_DIR }} init -backend=false
 
       - name: Terraform validate
@@ -65,46 +68,14 @@ jobs:
           output_format:    github_failed_only
           download_external_modules: true
 
-  # ─── workflow_dispatch plan-only (dry run) ────────────────────────────────
-  plan-only:
-    name: Plan only → DEV (dry run)
-    needs: lint-and-scan
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'plan'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials (OIDC — DEV account)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
-          aws-region:     ${{ env.AWS_REGION }}
-
-      - name: Terraform init
-        run: terraform -chdir=${{ env.TF_DIR }} init
-
-      - name: Terraform plan
-        run: |
-          terraform -chdir=${{ env.TF_DIR }} plan -no-color | tee plan-output.txt
-          echo "## Terraform Plan — DEV (dry run)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```terraform'                       >> "$GITHUB_STEP_SUMMARY"
-          cat plan-output.txt                       >> "$GITHUB_STEP_SUMMARY"
-          echo '```'                                >> "$GITHUB_STEP_SUMMARY"
-
-  # ─── Push to main: plan then apply ────────────────────────────────────────
-  plan-and-apply:
-    name: Plan & Apply → DEV
+  # ─── Job 2: Terraform plan — runs on push to main or workflow_dispatch ─────
+  plan:
+    name: Terraform plan — DEV
     needs: lint-and-scan
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: dev-terraform     # optional gate; add reviewers if needed
 
     steps:
       - uses: actions/checkout@v4
@@ -128,15 +99,70 @@ jobs:
           terraform -chdir=${{ env.TF_DIR }} plan \
             -no-color \
             -out=tfplan \
-            | tee plan-output.txt
+            2>&1 | tee plan-output.txt
 
-      - name: Terraform apply
-        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+      - name: Write plan to job summary
+        run: |
+          echo "## Terraform Plan — DEV" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                         >> "$GITHUB_STEP_SUMMARY"
+          echo '```terraform'             >> "$GITHUB_STEP_SUMMARY"
+          cat ${{ env.TF_DIR }}/plan-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                      >> "$GITHUB_STEP_SUMMARY"
+          echo ""                         >> "$GITHUB_STEP_SUMMARY"
+          echo "> Review the plan above, then approve the **Terraform apply — DEV** job to apply." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan-dev-${{ github.sha }}
-          path: ${{ env.TF_DIR }}/plan-output.txt
-          retention-days: 30
+          name: tfplan-dev-${{ github.run_id }}
+          path: |
+            ${{ env.TF_DIR }}/tfplan
+            ${{ env.TF_DIR }}/plan-output.txt
+          retention-days: 7     # plan artifacts expire — must apply within 7 days
+
+  # ─── Job 3: Approval gate then apply ──────────────────────────────────────
+  # GitHub pauses here and sends a notification to reviewers configured on
+  # the "dev-terraform" Environment (Settings → Environments → dev-terraform).
+  # Reviewer reads the plan from Job 2's summary, then clicks Approve.
+  apply:
+    name: Terraform apply — DEV
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: dev-terraform    # ← configure Required reviewers here
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — DEV account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Download approved plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.run_id }}
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform apply (approved plan only — no re-plan)
+        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+
+      - name: Apply summary
+        run: |
+          echo "### DEV infrastructure applied" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ github.sha }}\`"           >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Approved by**: ${{ github.actor }}"     >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run**: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            >> "$GITHUB_STEP_SUMMARY"
