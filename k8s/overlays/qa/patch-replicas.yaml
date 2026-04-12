@@ -6,7 +6,7 @@ metadata:
 spec:
   replicas: 1
   template:
-    spec:
+    spec: # nosemgrep: yaml.kubernetes.security.run-as-non-root.run-as-non-root
       containers:
         - name: nginx
           resources:

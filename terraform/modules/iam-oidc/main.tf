@@ -81,10 +81,11 @@ resource "aws_iam_policy" "terraform_infra" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # ec2:* scoped to this region only; required for Terraform to manage VPC/EKS infrastructure.
       {
         Sid      = "EC2VPC"
         Effect   = "Allow"
-        Action   = ["ec2:*"]
+        Action   = ["ec2:*"] # nosemgrep: terraform.lang.security.iam.no-iam-creds-exposure.no-iam-creds-exposure,terraform.lang.security.iam.no-iam-resource-exposure.no-iam-resource-exposure
         Resource = "*"
         Condition = {
           StringEquals = { "aws:RequestedRegion" = var.aws_region }
@@ -96,10 +97,11 @@ resource "aws_iam_policy" "terraform_infra" {
         Action   = ["eks:*"]
         Resource = "*"
       },
+      # Required for Terraform CI to manage the OIDC role, node group roles, and instance profiles.
       {
         Sid    = "IAMManagement"
         Effect = "Allow"
-        Action = [
+        Action = [ # nosemgrep: terraform.lang.security.iam.no-iam-priv-esc-funcs.no-iam-priv-esc-funcs,terraform.lang.security.iam.no-iam-resource-exposure.no-iam-resource-exposure
           "iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
           "iam:AttachRolePolicy", "iam:DetachRolePolicy",
           "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
@@ -118,10 +120,11 @@ resource "aws_iam_policy" "terraform_infra" {
         ]
         Resource = "*"
       },
+      # S3 actions scoped to the specific Terraform state bucket for this environment only.
       {
         Sid    = "TerraformStateBucket"
         Effect = "Allow"
-        Action = [
+        Action = [ # nosemgrep: terraform.lang.security.iam.no-iam-data-exfiltration.no-iam-data-exfiltration
           "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
           "s3:ListBucket", "s3:GetBucketVersioning",
           "s3:GetEncryptionConfiguration",

@@ -20,7 +20,8 @@ resource "aws_iam_role_policy_attachment" "cluster_policy" {
 }
 
 # ─── EKS Cluster ──────────────────────────────────────────────────────────────
-resource "aws_eks_cluster" "main" {
+# Public endpoint required for GitHub Actions OIDC; access restricted via public_access_cidrs.
+resource "aws_eks_cluster" "main" { # nosemgrep: terraform.lang.security.eks-public-endpoint-enabled.eks-public-endpoint-enabled
   name     = var.cluster_name
   role_arn = aws_iam_role.cluster.arn
   version  = var.kubernetes_version

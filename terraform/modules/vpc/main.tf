@@ -17,7 +17,8 @@ resource "aws_internet_gateway" "main" {
   })
 }
 
-resource "aws_subnet" "public" {
+# Public subnets require map_public_ip_on_launch for AWS NLB and NAT gateway.
+resource "aws_subnet" "public" { # nosemgrep: terraform.aws.security.aws-subnet-has-public-ip-address.aws-subnet-has-public-ip-address
   count                   = length(var.availability_zones)
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 4, count.index)

@@ -27,4 +27,8 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -sf http://localhost/health || exit 1
 
+# nginx master process must run as root to bind port 80; workers run as the
+# built-in 'nginx' user (UID 101). Suppressing the missing-user finding here
+# because switching to an unprivileged port (8080) is out of scope.
+# nosemgrep: dockerfile.security.missing-user-entrypoint.missing-user-entrypoint
 ENTRYPOINT ["/entrypoint.sh"]

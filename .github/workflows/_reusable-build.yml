@@ -48,10 +48,15 @@ jobs:
 
       - name: Derive image metadata
         id: meta
+        env:
+          REPO_RAW:  ${{ github.repository }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ENV_NAME:  ${{ inputs.env_name }}
+          GIT_SHA:   ${{ github.sha }}
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_REF="ghcr.io/${REPO}/nginx-release:${{ inputs.image_tag }}"
-          SHA_REF="ghcr.io/${REPO}/nginx-release:${{ inputs.env_name }}_${{ github.sha }}"
+          REPO=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REF="ghcr.io/${REPO}/nginx-release:${IMAGE_TAG}"
+          SHA_REF="ghcr.io/${REPO}/nginx-release:${ENV_NAME}_${GIT_SHA}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
           echo "sha_ref=${SHA_REF}"     >> "$GITHUB_OUTPUT"
           echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_ENV"
