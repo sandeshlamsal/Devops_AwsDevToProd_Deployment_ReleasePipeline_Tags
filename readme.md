@@ -297,52 +297,85 @@ GitHub Actions jobs that declare `environment:` receive a different OIDC subject
 
 This pipeline uses **AWS IAM Identity Center (SSO)** — no long-lived access keys. Sessions are time-limited, centrally audited, and revokable from the Control Tower master account.
 
-#### 0a — Set up IAM Identity Center (in the AWS Console, master account `810426675067`)
+#### IAM Identity Center — actual configuration
 
-1. Open **IAM Identity Center → Users** — confirm your user exists or create one
-2. Open **Permission sets → Create permission set** → choose `AdministratorAccess` (AWS managed) → name it `AdministratorAccess`
-3. Open **AWS accounts** → select `648426766457` (DEV) → **Assign users or groups** → assign your user with the `AdministratorAccess` permission set
-4. Note your **SSO start URL** from IAM Identity Center → **Dashboard** (format: `https://d-xxxxxxxxxx.awsapps.com/start`)
+| Field | Value |
+|---|---|
+| Instance ARN | `arn:aws:sso:::instance/ssoins-668412822c756057` |
+| Identity Store ID | `d-9a675626b0` |
+| SSO region | `us-east-2` |
+| Access portal URL | `https://d-9a675626b0.awsapps.com/start` |
+
+**Permission sets provisioned:**
+
+| Name | Policy | Accounts |
+|---|---|---|
+| `AdminAccess` | `AdministratorAccess` (AWS managed) | DEV · QA · PROD |
+| `DevAccess` | Custom | DEV · QA · PROD |
+| `ReadOnlyAccess` | `ReadOnlyAccess` (AWS managed) | DEV · QA · PROD |
+
+Use **`AdminAccess`** for bootstrap — it has full `AdministratorAccess` and is pre-assigned to all three accounts.
+
+#### 0a — Create your IAM Identity Center user (AWS Console, master account `810426675067`)
+
+1. Open **IAM Identity Center** (region: `us-east-2`) → **Users → Add user**
+2. Set username, email, first/last name → **Add user**
+3. Check your email and complete account activation
+4. **AWS accounts** (left sidebar) → select all three accounts (DEV · QA · PROD) → **Assign users or groups**
+   - Select your user → **Next** → select `AdminAccess` → **Submit**
 
 #### 0b — Add SSO profiles to `~/.aws/config`
 
-Add the following (replace the `sso_start_url` with yours):
-
 ```ini
 [sso-session nginx-pipeline]
-sso_start_url            = https://d-xxxxxxxxxx.awsapps.com/start
-sso_region               = us-east-1
+sso_start_url            = https://d-9a675626b0.awsapps.com/start
+sso_region               = us-east-2
 sso_registration_scopes  = sso:account:access
 
 [profile dev-admin]
 sso_session     = nginx-pipeline
 sso_account_id  = 648426766457
-sso_role_name   = AdministratorAccess
+sso_role_name   = AdminAccess
+region          = us-east-1
+output          = json
+
+[profile qa-admin]
+sso_session     = nginx-pipeline
+sso_account_id  = 506250256146
+sso_role_name   = AdminAccess
+region          = us-east-1
+output          = json
+
+[profile prod-admin]
+sso_session     = nginx-pipeline
+sso_account_id  = 429429082896
+sso_role_name   = AdminAccess
 region          = us-east-1
 output          = json
 ```
 
-> QA and PROD profiles (`qa-admin`, `prod-admin`) follow the same pattern with their account IDs — add them when you reach those environments.
+> All three profiles share the same `sso-session` — one login covers all accounts.
 
 #### 0c — Log in and verify
 
 ```bash
-# Log in (opens browser, token lasts 8–12 hours)
+# Log in once — opens browser, token lasts 8–12 hours
 aws sso login --sso-session nginx-pipeline
 
-# Verify you are in the DEV account
+# Verify you land in the DEV account
 aws sts get-caller-identity --profile dev-admin
 ```
 
 Expected output:
 ```json
 {
+    "UserId": "AROAZN6J7IB4T3NKZLYT7:sandeshlamsal",
     "Account": "648426766457",
-    "Arn": "arn:aws:sts::648426766457:assumed-role/AWSReservedSSO_AdministratorAccess_.../..."
+    "Arn": "arn:aws:sts::648426766457:assumed-role/AWSReservedSSO_AdminAccess_18f22c5cfac8d136/sandeshlamsal"
 }
 ```
 
-> Run `aws sso login --sso-session nginx-pipeline` at the start of each working session. The SSO token is shared across all profiles that reference the same `sso-session`.
+> Run `aws sso login --sso-session nginx-pipeline` at the start of each working session.
 
 ---
 
