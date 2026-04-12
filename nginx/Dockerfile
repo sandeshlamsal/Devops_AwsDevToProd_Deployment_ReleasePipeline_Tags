@@ -11,8 +11,10 @@ ENV APP_VERSION=${APP_VERSION} \
     ENV_NAME=${ENV_NAME} \
     BUILD_DATE=${BUILD_DATE}
 
-# Install tools: gettext for envsubst, curl for healthcheck
-RUN apk add --no-cache gettext curl
+# Upgrade all packages to pick up any security patches released after the
+# base image was built (libxml2, libssl3, libpng CVEs), then add tools.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache gettext curl
 
 # Nginx config
 COPY nginx.conf /etc/nginx/nginx.conf
