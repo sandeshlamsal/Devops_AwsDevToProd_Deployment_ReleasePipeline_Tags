@@ -228,11 +228,13 @@ terraform/
 
 ### OIDC IAM Role Scoping
 
-| Environment | Allowed OIDC Subjects | Used by |
-|---|---|---|
-| DEV | `refs/heads/main` | App deploy + Terraform apply |
-| QA | `refs/heads/main` + `refs/tags/qa_*` | Terraform (main) + App deploy (tag) |
-| PROD | `refs/heads/main` + `refs/tags/prod_*` | Terraform (main) + App deploy (tag) |
+GitHub Actions jobs that declare `environment:` receive a different OIDC subject than branch/tag jobs — both must be listed in the role's trust policy.
+
+| Environment | Allowed OIDC Subjects |
+|---|---|
+| DEV | `ref:refs/heads/main` · `environment:dev` · `environment:dev-terraform` |
+| QA | `ref:refs/heads/main` · `ref:refs/tags/qa_*` · `environment:qa` · `environment:qa-terraform` |
+| PROD | `ref:refs/heads/main` · `ref:refs/tags/prod_*` · `environment:prod` · `environment:prod-terraform` |
 
 ---
 
@@ -271,99 +273,224 @@ terraform/
 
 ---
 
-## One-Time Bootstrap (First-Time Setup Only)
+## Environment Setup
 
-This is the only time anything touches AWS outside of GitHub Actions.
-After bootstrap, all changes flow through CI.
+> **The bootstrap script is the only step that runs locally.**
+> Everything after that — cluster creation, app deployment, config changes — flows exclusively through GitHub Actions.
+> State locking uses S3 native conditional writes (Terraform ≥ 1.10). No DynamoDB table is needed.
 
-### Step 1 — Create S3 state buckets and DynamoDB lock tables
+---
 
-Run once in each account using temporary admin credentials:
+## DEV Environment Setup
 
-```bash
-# DEV account (648426766457)
-aws s3 mb s3://tfstate-nginx-release-dev-648426766457 --region us-east-1
-aws s3api put-bucket-versioning \
-  --bucket tfstate-nginx-release-dev-648426766457 \
-  --versioning-configuration Status=Enabled
-aws s3api put-bucket-encryption \
-  --bucket tfstate-nginx-release-dev-648426766457 \
-  --server-side-encryption-configuration \
-    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-aws dynamodb create-table \
-  --table-name tfstate-lock-dev \
-  --attribute-definitions AttributeName=LockID,AttributeType=S \
-  --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region us-east-1
+### Prerequisites
 
-# Repeat with qa / prod bucket names and lock table names
-```
-
-### Step 2 — Bootstrap the OIDC provider and IAM role
-
-Run once per account to create the GitHub OIDC provider and the initial IAM role.
-After this, GitHub Actions manages all subsequent infrastructure changes.
-
-```bash
-# From terraform/dev
-terraform init
-terraform apply -target=module.iam_oidc
-
-# Repeat for qa and prod
-```
-
-### Step 3 — Add GitHub Actions secrets
-
-After bootstrap, capture the role ARNs and store them as repository secrets:
-
-```bash
-terraform -chdir=terraform/dev  output github_actions_role_arn  # → DEV_IAM_ROLE_ARN
-terraform -chdir=terraform/qa   output github_actions_role_arn  # → QA_IAM_ROLE_ARN
-terraform -chdir=terraform/prod output github_actions_role_arn  # → PROD_IAM_ROLE_ARN
-```
-
-Add to **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|---|---|
-| `DEV_IAM_ROLE_ARN` | ARN from DEV terraform output |
-| `QA_IAM_ROLE_ARN` | ARN from QA terraform output |
-| `PROD_IAM_ROLE_ARN` | ARN from PROD terraform output |
-
-### Step 4 — Configure GitHub Environments
-
-Go to **Settings → Environments** and create:
-
-| Environment | Required reviewers | Purpose |
+| Tool | Minimum version | Check |
 |---|---|---|
-| `dev` | None | App auto-deploy |
-| `qa` | None | App tag-gated deploy |
-| `prod` | Named engineers | App deploy — manual approval |
-| `dev-terraform` | None | Terraform DEV auto-apply |
-| `qa-terraform` | Named engineers | Terraform QA apply gate |
-| `prod-terraform` | Named engineers | Terraform PROD apply gate |
+| Terraform | 1.10.0 | `terraform version` |
+| AWS CLI | v2 | `aws --version` |
+| AWS credentials | Admin in account `648426766457` | `aws sts get-caller-identity` |
 
-### Step 5 — Enable branch protection on `main`
+---
 
-Go to **Settings → Branches → Add rule** for `main`:
-
-- [x] Require a pull request before merging
-- [x] Require approvals (minimum 1)
-- [x] Require status checks to pass: `lint-and-scan`, `CI checks`
-- [x] Require branches to be up to date before merging
-- [x] Do not allow bypassing the above settings
-
-### Step 6 — Fix kustomize placeholder
+### Step 1 — Run bootstrap (local, one-time)
 
 ```bash
-sed -i 's/PLACEHOLDER/sandeshlamsal/g' k8s/overlays/*/kustomization.yaml
-git add k8s/ && git commit -m "fix: set GHCR org in kustomize overlays"
-git push
+./scripts/bootstrap.sh dev 648426766457
 ```
 
-After this push, GitHub Actions takes over — the `terraform-dev.yml` workflow
-applies the remaining DEV infrastructure, then `deploy-dev.yml` deploys the app.
+The script:
+1. Verifies your AWS identity matches account `648426766457`
+2. Creates S3 bucket `tfstate-nginx-release-dev-648426766457` (versioned · AES-256 encrypted · public access blocked)
+3. Runs `terraform init` + `terraform apply -target=module.iam_oidc`
+4. Creates the GitHub Actions OIDC provider and IAM role `GitHubActionsRole-dev`
+
+At the end it prints the role ARN — **copy it**:
+
+```
+github_actions_role_arn = "arn:aws:iam::648426766457:role/GitHubActionsRole-dev"
+```
+
+---
+
+### Step 2 — Add GitHub Secrets
+
+Go to: **Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Value | Used by |
+|---|---|---|
+| `DEV_IAM_ROLE_ARN` | Role ARN from Step 1 | All DEV workflows (OIDC) |
+| `GH_PAT` | Personal Access Token (see scopes below) | GitHub Environments Terraform + GHCR pull secret |
+
+**`GH_PAT` required scopes:**
+
+| Scope | Why |
+|---|---|
+| `repo` | Read/write repository content and settings |
+| `workflow` | Update workflow files |
+| `write:packages` + `read:packages` | Push and pull GHCR images |
+| `admin:repo_hook` | Create/update GitHub Environments via Terraform |
+
+> `GITHUB_TOKEN` is injected automatically — do **not** add it as a secret.
+
+---
+
+### Step 3 — Create GitHub Environments
+
+Run the Terraform GitHub workflow **once manually** before anything else. It creates the approval gates that terraform-dev and deploy-dev depend on.
+
+```
+Actions → "Terraform — GitHub Environments" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+Verify in **Settings → Environments** that all six exist:
+
+| Environment | Reviewer | Purpose |
+|---|---|---|
+| `dev` | sandeshlamsal | App deploy approval gate |
+| `qa` | _(none)_ | Tag-triggered — no manual gate |
+| `prod` | sandeshlamsal | App deploy approval gate |
+| `dev-terraform` | sandeshlamsal | Terraform DEV apply gate |
+| `qa-terraform` | sandeshlamsal | Terraform QA apply gate |
+| `prod-terraform` | sandeshlamsal | Terraform PROD apply gate |
+
+> To remove the DEV gate later, set `dev_app_reviewers = []` and `dev_terraform_reviewers = []` in [terraform/github/terraform.tfvars](terraform/github/terraform.tfvars) and push.
+
+---
+
+### Step 4 — Create DEV cluster
+
+```
+Actions → "Terraform — DEV" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+**Job flow:**
+
+```
+lint-and-scan   — terraform fmt · validate · Checkov (no AWS needed)
+    │
+    ▼
+plan            — OIDC → GitHubActionsRole-dev · terraform plan
+                  Plan output saved to job summary + artifact
+    │
+    ▼  [PAUSE — approval email sent to sandeshlamsal]
+       Open the run → read the plan in job summary → click Approve
+    │
+    ▼
+apply           — downloads the saved plan artifact · terraform apply
+                  (no re-plan — zero drift between what was reviewed and what runs)
+```
+
+**Resources created (~15 min):**
+
+| Resource | Detail |
+|---|---|
+| VPC | `10.10.0.0/16` across `us-east-1a` / `us-east-1b` |
+| Subnets | Public + private per AZ, single NAT gateway |
+| EKS cluster | `eks-dev` · Kubernetes 1.29 · `API_AND_CONFIG_MAP` auth mode |
+| Node group | SPOT · `t3.small/medium/t3a.small/t3a.medium` · desired: 1 · max: 3 |
+| OIDC provider | EKS cluster OIDC (for IRSA) |
+| EKS access entry | `GitHubActionsRole-dev` → `AmazonEKSAdminPolicy` scoped to `release-app` namespace |
+
+---
+
+### Step 5 — Deploy the app to DEV
+
+Every push to `main` triggers `deploy-dev.yml` automatically. The commit from Step 4 will already have triggered it. To force a fresh one:
+
+```bash
+git commit --allow-empty -m "trigger: first DEV app deploy"
+git push origin main
+```
+
+**Job flow:**
+
+```
+ci      — Gitleaks (secret scan) · Semgrep SAST · nginx -t lint · 4 unit tests
+    │
+    ▼
+build   — Docker build (version injected via build-args)
+          Trivy scan — blocks on CRITICAL/HIGH unfixed CVEs
+          Push to GHCR:
+            ghcr.io/sandeshlamsal/<repo>/nginx-release:dev_<sha>_v<N>   ← versioned
+            ghcr.io/sandeshlamsal/<repo>/nginx-release:dev_<sha>        ← promotion alias
+    │
+    ▼  [PAUSE — approval gate: GitHub Environment "dev"]
+       Open the run → click Approve
+    │
+    ▼
+deploy  — OIDC → GitHubActionsRole-dev (subject: environment:dev)
+          aws eks update-kubeconfig  (cluster: eks-dev)
+          Install kustomize v5.3.0
+          kubectl create namespace release-app
+          kubectl create secret docker-registry ghcr-pull-secret (using GH_PAT — long-lived)
+          kustomize edit set image → patches overlay with exact tag
+          kubectl create configmap nginx-release-config
+          kubectl apply -k k8s/overlays/dev
+          kubectl rollout status --timeout=300s
+          Poll for LoadBalancer hostname (30 × 10 s)
+          scripts/smoke-test.sh — 6 endpoint checks
+          OWASP ZAP baseline scan — report only (no failure in DEV)
+```
+
+---
+
+### Step 6 — Verify DEV is live
+
+The deploy job summary shows the URL. Check it manually:
+
+```bash
+# Health endpoint
+curl http://<nlb-hostname>/health
+# → HTTP 200
+
+# Version info
+curl http://<nlb-hostname>/version
+# → {"version":"dev_<sha>_v1","sha":"<sha>","env":"dev","buildDate":"..."}
+
+# Index page
+curl http://<nlb-hostname>/
+# → HTML with "Release Dashboard" heading and the version tag
+
+# Security headers
+curl -I http://<nlb-hostname>/
+# → X-Frame-Options, X-Content-Type-Options present
+```
+
+---
+
+### DEV audit — all issues resolved
+
+| # | File | Issue | Status |
+|---|---|---|---|
+| 1 | `terraform/{dev,qa,prod}/terraform.tfvars` | Placeholder `YOUR_GITHUB_ORG` / `YOUR_REPO_NAME` | Fixed |
+| 2 | `k8s/overlays/*/kustomization.yaml` | `bases:` deprecated in kustomize v5 | Fixed → `resources:` |
+| 3 | `deploy-dev.yml` | `kustomize` not installed on runner | Fixed → `imranismail/setup-kustomize@v2` |
+| 4 | `deploy-dev.yml` | Namespace not created before apply | Fixed → `kubectl create namespace` |
+| 5 | `deploy-dev.yml` | No GHCR pull secret before `kubectl apply` | Fixed |
+| 6 | `k8s/base/deployment.yaml` | No `imagePullSecrets` on pod spec | Fixed |
+| 7 | `deploy-*.yml` | Pull secret used `GITHUB_TOKEN` (expires ~1 hr) → `ImagePullBackOff` on pod restart | Fixed → `GH_PAT` |
+| 8 | `terraform/dev/main.tf` | OIDC `allowed_subjects` missing `environment:dev` + `environment:dev-terraform` → apply/deploy jobs fail to assume role | Fixed |
+| 9 | `terraform/modules/eks/main.tf` | Missing `authentication_mode = API_AND_CONFIG_MAP` → access entries API unavailable | Fixed |
+| 10 | `terraform/dev/main.tf` | No EKS access entry → `kubectl` returns Unauthorized despite valid IAM credentials | Fixed |
+| 11 | `.github/workflows/terraform-dev.yml` | Plan output written to repo root, read from `$TF_DIR` → empty plan summary for reviewers | Fixed |
+| 12 | All backends + IAM policy | DynamoDB used for state locking | Removed → S3 native locking (`use_lockfile = true`, Terraform ≥ 1.10) |
+
+---
+
+## QA Environment Setup
+
+> _Coming soon. QA setup follows the same pattern but is triggered by `qa_*` git tags._
+
+---
+
+## PROD Environment Setup
+
+> _Coming soon. PROD setup follows the same pattern with stricter approval gates and auto-rollback._
 
 ---
 
