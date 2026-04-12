@@ -69,7 +69,7 @@ resource "github_repository_environment" "prod" {
   repository          = var.github_repo
   environment         = "prod"
   prevent_self_review = true
-  wait_timer          = var.prod_wait_minutes   # optional delay after approval
+  wait_timer          = var.prod_wait_minutes # optional delay after approval
 
   reviewers {
     users = [for u in var.prod_app_reviewers : local.uid[u]]
