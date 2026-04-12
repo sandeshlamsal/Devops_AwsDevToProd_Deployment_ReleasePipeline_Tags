@@ -112,6 +112,9 @@ jobs:
             -target=module.iam_oidc \
             -no-color
 
+      - name: Wait for IAM propagation
+        run: sleep 30
+
       - name: Terraform plan
         run: |
           set -o pipefail

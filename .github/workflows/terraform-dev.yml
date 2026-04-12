@@ -106,6 +106,13 @@ jobs:
             -target=module.iam_oidc \
             -no-color
 
+      # IAM policy updates propagate globally within seconds but can lag up to
+      # ~30 s before all regional endpoints reflect the change. Without this
+      # pause the plan refresh (which calls logs:ListTagsForResource, kms:*, etc.)
+      # can still see the old policy and fail with AccessDeniedException.
+      - name: Wait for IAM propagation
+        run: sleep 30
+
       - name: Terraform plan
         id: plan
         run: |
