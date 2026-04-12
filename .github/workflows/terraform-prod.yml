@@ -105,13 +105,21 @@ jobs:
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_DIR }} init
 
+      - name: Pre-apply IAM permissions (bootstrap gate)
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} apply \
+            -auto-approve \
+            -target=module.iam_oidc \
+            -no-color
+
       - name: Terraform plan
         id: plan
         run: |
+          set -o pipefail
           terraform -chdir=${{ env.TF_DIR }} plan \
             -no-color \
             -out=tfplan \
-            | tee plan-output.txt
+            2>&1 | tee plan-output.txt
 
       - name: Write plan to job summary
         run: |

@@ -93,9 +93,23 @@ jobs:
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_DIR }} init
 
+      # Apply the IAM/OIDC module first so that all required permissions (KMS,
+      # CreateServiceLinkedRole, logs:ListTagsForResource, etc.) are live in AWS
+      # before the plan refresh reads existing resources. Without this, the plan
+      # step itself fails with AccessDeniedException on resources created in prior
+      # partial applies (bootstrap deadlock: plan needs permission → apply grants
+      # it → plan failure prevents apply from ever running).
+      - name: Pre-apply IAM permissions (bootstrap gate)
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} apply \
+            -auto-approve \
+            -target=module.iam_oidc \
+            -no-color
+
       - name: Terraform plan
         id: plan
         run: |
+          set -o pipefail
           terraform -chdir=${{ env.TF_DIR }} plan \
             -no-color \
             -out=tfplan \
