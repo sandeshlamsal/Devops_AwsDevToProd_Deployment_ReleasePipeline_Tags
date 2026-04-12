@@ -117,7 +117,7 @@ resource "aws_iam_policy" "terraform_infra" {
           "iam:CreateOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider",
           "iam:GetOpenIDConnectProvider", "iam:UpdateOpenIDConnectProvider",
           "iam:TagOpenIDConnectProvider",
-          "iam:ListRoles", "iam:ListPolicies",
+          "iam:ListRoles", "iam:ListPolicies", "iam:ListInstanceProfilesForRole",
         ]
         Resource = "*"
       },
