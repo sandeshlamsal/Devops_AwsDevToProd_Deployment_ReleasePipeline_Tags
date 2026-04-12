@@ -66,11 +66,14 @@ jobs:
         run: kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Create GHCR pull secret
+        # Use GH_PAT (long-lived) not GITHUB_TOKEN (expires with workflow run).
+        # Kubernetes re-uses this secret on every pod restart — an expired token
+        # causes ImagePullBackOff on the next restart.
         run: |
           kubectl create secret docker-registry ghcr-pull-secret \
             --docker-server=ghcr.io \
-            --docker-username=${{ github.actor }} \
-            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --docker-username=${{ github.repository_owner }} \
+            --docker-password=${{ secrets.GH_PAT }} \
             -n ${{ env.NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
