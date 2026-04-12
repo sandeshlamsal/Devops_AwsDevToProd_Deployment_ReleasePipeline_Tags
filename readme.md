@@ -326,12 +326,43 @@ Use **`AdminAccess`** for bootstrap — it has full `AdministratorAccess` and is
 
 #### 0b — Add SSO profiles to `~/.aws/config`
 
+Full file for reference (existing LocalStack profiles are kept for local dev; SSO profiles are appended):
+
 ```ini
+# ── Default ───────────────────────────────────────────────────────────────────
+[default]
+region = us-east-1
+output = json
+
+# ── LocalStack (local development only) ───────────────────────────────────────
+[profile dev]
+region       = us-east-1
+output       = json
+endpoint_url = http://localhost:4566
+
+[profile qa]
+region       = us-east-1
+output       = json
+endpoint_url = http://localhost:4567
+
+[profile prod]
+region       = us-east-1
+output       = json
+endpoint_url = http://localhost:4568
+
+# ── AWS IAM Identity Center — shared SSO session ──────────────────────────────
+# Identity Center instance: ssoins-668412822c756057  (us-east-2)
+# Identity store:           d-9a675626b0
+# Portal URL:               https://d-9a675626b0.awsapps.com/start
+#
+# Login once to refresh token for all profiles:
+#   aws sso login --sso-session nginx-pipeline
 [sso-session nginx-pipeline]
 sso_start_url            = https://d-9a675626b0.awsapps.com/start
 sso_region               = us-east-2
 sso_registration_scopes  = sso:account:access
 
+# DEV workload account (648426766457)
 [profile dev-admin]
 sso_session     = nginx-pipeline
 sso_account_id  = 648426766457
@@ -339,6 +370,7 @@ sso_role_name   = AdminAccess
 region          = us-east-1
 output          = json
 
+# QA workload account (506250256146)
 [profile qa-admin]
 sso_session     = nginx-pipeline
 sso_account_id  = 506250256146
@@ -346,6 +378,7 @@ sso_role_name   = AdminAccess
 region          = us-east-1
 output          = json
 
+# PROD workload account (429429082896)
 [profile prod-admin]
 sso_session     = nginx-pipeline
 sso_account_id  = 429429082896
@@ -354,7 +387,7 @@ region          = us-east-1
 output          = json
 ```
 
-> All three profiles share the same `sso-session` — one login covers all accounts.
+> `sso_region` (`us-east-2`) is where Identity Center is hosted. `region` (`us-east-1`) is where your AWS resources live — these are independent settings.
 
 #### 0c — Log in and verify
 
