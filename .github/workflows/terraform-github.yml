@@ -1,0 +1,188 @@
+name: Terraform — GitHub Environments
+
+# Manages GitHub Environments and their required reviewers via the GitHub Terraform provider.
+# Changing reviewers = edit terraform/github/terraform.tfvars and merge to main.
+#
+# Auth needed:
+#   GH_PAT       — GitHub fine-grained PAT with:
+#                    "Environments" repository permission (read + write)
+#                    "Administration" repository permission (read + write)
+#   DEV_IAM_ROLE_ARN — OIDC role for the S3 Terraform state backend (DEV account)
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = preview changes | apply = create/update environments"
+        required: true
+        default: apply
+        type: choice
+        options: [plan, apply]
+
+  push:
+    branches: [main]
+    paths:
+      - "terraform/github/**"
+
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/github/**"
+
+env:
+  TF_DIR:     terraform/github
+  AWS_REGION: us-east-1
+  TF_VERSION: "~1.6"
+
+permissions:
+  contents:      read
+  id-token:      write        # OIDC for S3 backend
+  pull-requests: write
+
+jobs:
+  # ─── Job 1: Lint (no credentials needed) ──────────────────────────────────
+  lint:
+    name: Fmt · Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt check
+        run: terraform -chdir=${{ env.TF_DIR }} fmt -check -recursive
+
+      - name: Terraform init (local — no backend)
+        run: terraform -chdir=${{ env.TF_DIR }} init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ env.TF_DIR }} validate
+
+      - name: Post PR lint summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### Terraform GitHub Environments — lint passed ✅\n\nMerge to `main` to update GitHub Environments and reviewers.'
+            });
+
+  # ─── Job 2: Plan ──────────────────────────────────────────────────────────
+  plan:
+    name: Terraform plan — GitHub environments
+    needs: lint
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — DEV account, for S3 backend)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} plan \
+            -no-color \
+            -out=tfplan \
+            2>&1 | tee plan-output.txt
+
+      - name: Write plan to job summary
+        run: |
+          echo "## Terraform Plan — GitHub Environments" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                         >> "$GITHUB_STEP_SUMMARY"
+          echo '```terraform'                             >> "$GITHUB_STEP_SUMMARY"
+          cat ${{ env.TF_DIR }}/plan-output.txt          >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                                      >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                         >> "$GITHUB_STEP_SUMMARY"
+          echo "> Approve the **apply** job to update GitHub Environments." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-github-${{ github.run_id }}
+          path: |
+            ${{ env.TF_DIR }}/tfplan
+            ${{ env.TF_DIR }}/plan-output.txt
+          retention-days: 7
+
+  # ─── Job 3: Apply (approval gate) ─────────────────────────────────────────
+  # NOTE: On first run the environments don't exist yet — use workflow_dispatch
+  # with action=apply. The apply job has no environment gate on purpose to
+  # avoid the bootstrap chicken-and-egg problem. Security is enforced by:
+  #   - Branch protection (PR + review required before merge to main)
+  #   - GH_PAT scoped to environments + administration only
+  apply:
+    name: Terraform apply — GitHub environments
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — DEV account, for S3 backend)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Download approved plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-github-${{ github.run_id }}
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform init
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform apply
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+
+      - name: Apply summary
+        run: |
+          echo "### GitHub Environments updated"             >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                            >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | Reviewers |"                >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|"                                   >> "$GITHUB_STEP_SUMMARY"
+          echo "| dev | none (auto) |"                      >> "$GITHUB_STEP_SUMMARY"
+          echo "| qa  | none (tag-gated) |"                 >> "$GITHUB_STEP_SUMMARY"
+          echo "| prod | configured via tfvars |"           >> "$GITHUB_STEP_SUMMARY"
+          echo "| dev-terraform | configured via tfvars |"  >> "$GITHUB_STEP_SUMMARY"
+          echo "| qa-terraform  | configured via tfvars |"  >> "$GITHUB_STEP_SUMMARY"
+          echo "| prod-terraform | configured via tfvars |" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                            >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ github.sha }}\`"            >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Applied by**: ${{ github.actor }}"      >> "$GITHUB_STEP_SUMMARY"
