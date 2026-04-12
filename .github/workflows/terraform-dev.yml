@@ -168,17 +168,25 @@ jobs:
           role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
 
-      - name: Download approved plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan-dev-${{ github.run_id }}
-          path: ${{ env.TF_DIR }}
-
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_DIR }} init
 
-      - name: Terraform apply (approved plan only — no re-plan)
-        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+      # ONE-TIME migration step: EKS cluster was created at 1.29 (EOL).
+      # AWS does not support skipping minor versions, so the cluster must be
+      # destroyed and recreated at 1.34. Remove this step after the first
+      # successful apply at 1.34.
+      - name: Destroy EKS module (version migration 1.29 → 1.34)
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} destroy \
+            -auto-approve \
+            -target=module.eks \
+            -no-color
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} apply \
+            -auto-approve \
+            -no-color
 
       - name: Apply summary
         run: |
