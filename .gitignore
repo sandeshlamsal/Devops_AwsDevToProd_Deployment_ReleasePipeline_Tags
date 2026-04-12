@@ -1,0 +1,42 @@
+# ─── Terraform ────────────────────────────────────────────────────────────────
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfvars.backup
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Terraform variable files may contain secrets — never commit
+# terraform.tfvars is committed only because it holds non-secret config.
+# Any file matching *.auto.tfvars should NOT be committed.
+*.auto.tfvars
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+.dockerignore
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Editor ───────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Secrets / credentials — never commit ─────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+kubeconfig
+.env
+.env.*
+credentials

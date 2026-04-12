@@ -71,8 +71,9 @@ module "iam_oidc" {
   github_org     = var.github_org
   github_repo    = var.github_repo
 
-  # QA: only tags matching qa_<sha>_<version>
+  # QA: tags for k8s deploys + main branch for terraform plan/apply via CI
   allowed_subjects = [
     "repo:${var.github_org}/${var.github_repo}:ref:refs/tags/qa_*",
+    "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main",
   ]
 }

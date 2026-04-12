@@ -72,8 +72,11 @@ module "iam_oidc" {
   github_org     = var.github_org
   github_repo    = var.github_repo
 
-  # PROD: only tags matching prod_<sha>_<version>
+  # PROD: tags for k8s deploys + main branch for terraform plan/apply via CI
+  # The 'prod' GitHub Environment gate (required reviewers) is what enforces
+  # human approval before any terraform apply runs against this account.
   allowed_subjects = [
     "repo:${var.github_org}/${var.github_repo}:ref:refs/tags/prod_*",
+    "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main",
   ]
 }

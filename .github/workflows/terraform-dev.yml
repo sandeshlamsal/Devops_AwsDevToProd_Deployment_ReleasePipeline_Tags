@@ -1,0 +1,100 @@
+name: Terraform — DEV
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
+# PRs:        fmt + validate + checkov (no AWS access — safe for forks)
+# Push main:  plan → apply (OIDC role, DEV account)
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/dev/**"
+      - "terraform/modules/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/dev/**"
+      - "terraform/modules/**"
+
+env:
+  TF_DIR:        terraform/dev
+  AWS_REGION:    us-east-1
+  TF_VERSION:    "~1.6"
+
+permissions:
+  contents:      read
+  id-token:      write        # OIDC (apply job only)
+  pull-requests: write        # post plan comment
+
+jobs:
+  # ─── PR: static checks (no AWS credentials needed) ────────────────────────
+  lint-and-scan:
+    name: Fmt · Validate · Security scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt check
+        run: terraform -chdir=${{ env.TF_DIR }} fmt -check -recursive
+
+      - name: Terraform init (local only — no backend)
+        run: terraform -chdir=${{ env.TF_DIR }} init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ env.TF_DIR }} validate
+
+      - name: Checkov — IaC security scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory:        ${{ env.TF_DIR }}
+          framework:        terraform
+          soft_fail:        false
+          output_format:    github_failed_only
+          download_external_modules: true
+
+  # ─── Push to main: plan then apply ────────────────────────────────────────
+  plan-and-apply:
+    name: Plan & Apply → DEV
+    needs: lint-and-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev-terraform     # optional gate; add reviewers if needed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — DEV account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} plan \
+            -no-color \
+            -out=tfplan \
+            | tee plan-output.txt
+
+      - name: Terraform apply
+        run: terraform -chdir=${{ env.TF_DIR }} apply -auto-approve tfplan
+
+      - name: Upload plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.sha }}
+          path: ${{ env.TF_DIR }}/plan-output.txt
+          retention-days: 30
