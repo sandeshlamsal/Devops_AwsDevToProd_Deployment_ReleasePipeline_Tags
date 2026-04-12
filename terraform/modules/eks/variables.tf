@@ -11,7 +11,7 @@ variable "environment" {
 variable "kubernetes_version" {
   type        = string
   description = "EKS Kubernetes version"
-  default     = "1.29"
+  default     = "1.34"
 }
 
 variable "public_subnet_ids" {
