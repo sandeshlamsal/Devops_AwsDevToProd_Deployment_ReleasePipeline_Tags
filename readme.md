@@ -393,6 +393,7 @@ output          = json
 
 ```bash
 # Log in once — opens browser, token lasts 8–12 hours
+# One login covers all three profiles (dev-admin, qa-admin, prod-admin)
 aws sso login --sso-session nginx-pipeline
 
 # Verify you land in the DEV account
@@ -408,7 +409,78 @@ Expected output:
 }
 ```
 
-> Run `aws sso login --sso-session nginx-pipeline` at the start of each working session.
+> Run `aws sso login --sso-session nginx-pipeline` at the start of each working session. Token lasts 8–12 hours.
+
+---
+
+### Accessing the DEV account
+
+#### CLI access
+
+Every AWS CLI command for DEV resources uses `--profile dev-admin`:
+
+```bash
+# Check any resource in DEV
+aws s3 ls --profile dev-admin
+aws eks list-clusters --region us-east-1 --profile dev-admin
+aws iam list-roles --profile dev-admin --query 'Roles[?contains(RoleName,`GitHubActions`)].RoleName'
+
+# Verify S3 state bucket
+aws s3api head-bucket \
+  --bucket tfstate-nginx-release-dev-648426766457 \
+  --profile dev-admin
+
+# Check bucket versioning and encryption
+aws s3api get-bucket-versioning \
+  --bucket tfstate-nginx-release-dev-648426766457 \
+  --profile dev-admin
+
+aws s3api get-bucket-encryption \
+  --bucket tfstate-nginx-release-dev-648426766457 \
+  --profile dev-admin
+
+# List state files in the bucket
+aws s3 ls s3://tfstate-nginx-release-dev-648426766457 \
+  --profile dev-admin --recursive
+```
+
+#### AWS Console access (browser)
+
+Open the SSO access portal and select the DEV account:
+
+```
+https://d-9a675626b0.awsapps.com/start
+```
+
+1. Log in with your `sandeshlamsal` Identity Center credentials
+2. Select **648426766457** (DEV account)
+3. Click **AdminAccess → Management console**
+
+You are now in the DEV account console. Common areas to check:
+
+| What to verify | Console path |
+|---|---|
+| S3 state bucket | S3 → `tfstate-nginx-release-dev-648426766457` |
+| IAM role | IAM → Roles → `GitHubActionsRole-dev` |
+| OIDC provider | IAM → Identity providers → `token.actions.githubusercontent.com` |
+| EKS cluster (after terraform-dev) | EKS → Clusters → `eks-dev` |
+| NLB (after app deploy) | EC2 → Load balancers |
+| CloudWatch logs | CloudWatch → Log groups → `/aws/eks/eks-dev` |
+
+#### Switch between accounts
+
+```bash
+# DEV
+aws sts get-caller-identity --profile dev-admin
+
+# QA
+aws sts get-caller-identity --profile qa-admin
+
+# PROD
+aws sts get-caller-identity --profile prod-admin
+```
+
+> All three profiles share the `nginx-pipeline` SSO session — no separate login needed per account.
 
 ---
 
