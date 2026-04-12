@@ -1,4 +1,4 @@
-FROM nginx:1.25-alpine
+FROM nginx:1.27-alpine
 
 # Build-time version metadata — baked in as defaults, can be overridden by K8s env vars
 ARG APP_VERSION=unknown
