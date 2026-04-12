@@ -144,6 +144,19 @@ resource "aws_iam_policy" "terraform_infra" {
         ]
         Resource = "*"
       },
+      {
+        Sid    = "KMSManagement"
+        Effect = "Allow"
+        Action = [
+          "kms:CreateKey", "kms:DescribeKey", "kms:EnableKeyRotation",
+          "kms:GetKeyPolicy", "kms:GetKeyRotationStatus",
+          "kms:ListResourceTags", "kms:PutKeyPolicy",
+          "kms:ScheduleKeyDeletion", "kms:TagResource", "kms:UntagResource",
+          "kms:CreateAlias", "kms:DeleteAlias", "kms:ListAliases", "kms:UpdateAlias",
+          "kms:CreateGrant", "kms:ListGrants", "kms:RevokeGrant",
+        ]
+        Resource = "*"
+      },
     ]
   })
 }
