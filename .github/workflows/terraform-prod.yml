@@ -8,6 +8,15 @@ name: Terraform — PROD
 #   1. GitHub Environment "prod-terraform" — requires named reviewers
 #   2. OIDC role trust — only main branch can assume it
 on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = dry run only | apply = plan + apply (requires approval)"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+
   push:
     branches: [main]
     paths:
@@ -75,7 +84,9 @@ jobs:
   plan:
     name: Terraform plan (PROD preview)
     needs: lint-and-scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
@@ -122,6 +133,9 @@ jobs:
   apply:
     name: Apply → PROD (approval required)
     needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
     runs-on: ubuntu-latest
     environment: prod-terraform    # ← Set Required reviewers here in GitHub Settings
 

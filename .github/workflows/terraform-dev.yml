@@ -4,6 +4,15 @@ name: Terraform — DEV
 # PRs:        fmt + validate + checkov (no AWS access — safe for forks)
 # Push main:  plan → apply (OIDC role, DEV account)
 on:
+  workflow_dispatch:       # ← manual trigger from GitHub Actions UI
+    inputs:
+      action:
+        description: "plan = dry run only | apply = plan + apply"
+        required: true
+        default: apply
+        type: choice
+        options: [plan, apply]
+
   push:
     branches: [main]
     paths:
@@ -56,11 +65,44 @@ jobs:
           output_format:    github_failed_only
           download_external_modules: true
 
+  # ─── workflow_dispatch plan-only (dry run) ────────────────────────────────
+  plan-only:
+    name: Plan only → DEV (dry run)
+    needs: lint-and-scan
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'plan'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC — DEV account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Terraform plan
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} plan -no-color | tee plan-output.txt
+          echo "## Terraform Plan — DEV (dry run)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```terraform'                       >> "$GITHUB_STEP_SUMMARY"
+          cat plan-output.txt                       >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                                >> "$GITHUB_STEP_SUMMARY"
+
   # ─── Push to main: plan then apply ────────────────────────────────────────
   plan-and-apply:
     name: Plan & Apply → DEV
     needs: lint-and-scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
     runs-on: ubuntu-latest
     environment: dev-terraform     # optional gate; add reviewers if needed
 

@@ -4,6 +4,15 @@ name: Terraform — QA
 # PRs:        fmt + validate + checkov
 # Push main:  plan → apply (OIDC role, QA account, requires manual approval)
 on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = dry run only | apply = plan + apply (requires approval)"
+        required: true
+        default: apply
+        type: choice
+        options: [plan, apply]
+
   push:
     branches: [main]
     paths:
@@ -71,7 +80,9 @@ jobs:
   plan-and-apply:
     name: Plan & Apply → QA
     needs: lint-and-scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
     runs-on: ubuntu-latest
     environment: qa-terraform     # configure Required reviewers in GitHub Settings
 
