@@ -99,7 +99,7 @@ jobs:
           terraform -chdir=${{ env.TF_DIR }} plan \
             -no-color \
             -out=tfplan \
-            2>&1 | tee plan-output.txt
+            2>&1 | tee ${{ env.TF_DIR }}/plan-output.txt
 
       - name: Write plan to job summary
         run: |

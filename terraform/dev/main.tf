@@ -63,6 +63,30 @@ module "eks" {
   max_nodes      = 3
 }
 
+# ─── Grant GitHub Actions role kubectl access inside the cluster ──────────────
+# EKS access entries API (requires authentication_mode = API_AND_CONFIG_MAP on cluster).
+# Scoped to release-app namespace only — least privilege.
+resource "aws_eks_access_entry" "github_actions" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = module.iam_oidc.github_actions_role_arn
+  type          = "STANDARD"
+
+  depends_on = [module.eks, module.iam_oidc]
+}
+
+resource "aws_eks_access_policy_association" "github_actions" {
+  cluster_name  = module.eks.cluster_name
+  principal_arn = module.iam_oidc.github_actions_role_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
+
+  access_scope {
+    type       = "namespace"
+    namespaces = ["release-app"]
+  }
+
+  depends_on = [aws_eks_access_entry.github_actions]
+}
+
 module "iam_oidc" {
   source = "../modules/iam-oidc"
 
@@ -73,8 +97,11 @@ module "iam_oidc" {
   github_org     = var.github_org
   github_repo    = var.github_repo
 
-  # DEV: triggered by pushes to main branch
+  # DEV: main branch (plan job) + named environments (apply/deploy jobs)
+  # Jobs that declare `environment:` get subject ..:environment:<name>, NOT ..:ref:..
   allowed_subjects = [
     "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main",
+    "repo:${var.github_org}/${var.github_repo}:environment:dev",
+    "repo:${var.github_org}/${var.github_repo}:environment:dev-terraform",
   ]
 }

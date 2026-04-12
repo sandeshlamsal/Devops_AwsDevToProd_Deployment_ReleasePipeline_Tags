@@ -32,6 +32,11 @@ resource "aws_eks_cluster" "main" {
     public_access_cidrs     = var.public_access_cidrs
   }
 
+  # Enable access entries API alongside aws-auth ConfigMap (required for aws_eks_access_entry)
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
+
   # CloudWatch logging — audit + API logs always on; others configurable
   enabled_cluster_log_types = ["api", "audit", "authenticator"]
 
