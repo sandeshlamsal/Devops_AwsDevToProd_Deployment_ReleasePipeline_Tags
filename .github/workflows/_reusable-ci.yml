@@ -28,13 +28,19 @@ jobs:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}   # omit for FOSS projects
 
       # ── SAST ─────────────────────────────────────────────────────────────────
+      # Install from pip so CI uses the same semgrep version as local dev,
+      # preventing rule-ID drift from the old semgrep-agent:v1 Docker image.
+      - name: Install Semgrep
+        run: pip install semgrep==1.159.0
+
       - name: Semgrep — SAST scan
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >
-            p/default
-            p/dockerfile
-            p/nginx
+        run: |
+          semgrep scan \
+            --config "p/default" \
+            --config "p/dockerfile" \
+            --config "p/nginx" \
+            --error \
+            --no-autofix
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}   # optional; fine without it
 
