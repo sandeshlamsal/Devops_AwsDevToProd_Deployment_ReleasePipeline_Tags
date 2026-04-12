@@ -10,6 +10,12 @@ variable "github_repo" {
 
 # ── Reviewer lists — GitHub usernames, not emails ─────────────────────────────
 
+variable "dev_app_reviewers" {
+  type        = list(string)
+  description = "GitHub usernames that must approve DEV app deployments. Empty = auto-deploy."
+  default     = []
+}
+
 variable "prod_app_reviewers" {
   type        = list(string)
   description = "GitHub usernames that must approve PROD app deployments (deploy-prod.yml)"

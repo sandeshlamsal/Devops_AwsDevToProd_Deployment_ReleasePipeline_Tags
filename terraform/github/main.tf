@@ -32,6 +32,7 @@ data "github_user" "reviewer" {
 locals {
   # Flat union of every reviewer list — used for the data source loop
   all_reviewer_usernames = toset(concat(
+    var.dev_app_reviewers,
     var.prod_app_reviewers,
     var.dev_terraform_reviewers,
     var.qa_terraform_reviewers,
@@ -47,7 +48,14 @@ locals {
 resource "github_repository_environment" "dev" {
   repository  = var.github_repo
   environment = "dev"
-  # No reviewers — auto-deploy on every push to main
+
+  # Optional gate — empty list = auto-deploy, add names to gate like PROD
+  dynamic "reviewers" {
+    for_each = length(var.dev_app_reviewers) > 0 ? [1] : []
+    content {
+      users = [for u in var.dev_app_reviewers : local.uid[u]]
+    }
+  }
 }
 
 resource "github_repository_environment" "qa" {
