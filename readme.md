@@ -673,6 +673,38 @@ curl -I http://<nlb-hostname>/
 
 ---
 
+### Pipeline SAST failures — all resolved
+
+These failures appeared when the `terraform-github.yml` pipeline first ran end-to-end. Both scanners (Semgrep and Checkov) ran in the CI jobs but had not been exercised before.
+
+#### Semgrep — 12 blocking findings (run [#24310192653](https://github.com/sandeshlamsal/Devops_AwsDevToProd_Deployment_ReleasePipeline_Tags/actions/runs/24310192653))
+
+| Rule ID | File | Issue | Resolution |
+|---|---|---|---|
+| `yaml.github-actions.security.run-shell-injection` | `_reusable-build.yml` | `${{ github.repository }}` and `${{ inputs.image_tag }}` used directly in `run:` shell — attacker-controlled input could inject shell commands | **Fixed** — moved all context vars to `env:` block; shell reads `$REPO_RAW`, `$IMAGE_TAG`, etc. |
+| `dockerfile.security.missing-user-entrypoint` | `nginx/Dockerfile` | No `USER` instruction before `ENTRYPOINT` — container runs as root | **`# nosemgrep`** — nginx master process requires root to bind port 80; worker processes already run as the built-in `nginx` (UID 101) user |
+| `yaml.kubernetes.security.run-as-non-root` | `k8s/overlays/*/patch-replicas.yaml` (×3) | Pod spec missing `securityContext.runAsNonRoot: true` | **`# nosemgrep`** — same root requirement as above; would crash pod if enabled without switching to port 8080 |
+| `terraform.lang.security.eks-public-endpoint-enabled` | `terraform/modules/eks/main.tf` | EKS public API endpoint not explicitly disabled | **`# nosemgrep`** — required for GitHub Actions OIDC runners to reach the API server |
+| `terraform.lang.security.iam.no-iam-creds-exposure` | `terraform/modules/iam-oidc/main.tf` | `ec2:*` action in IAM policy | **`# nosemgrep`** — Terraform CI role needs broad EC2 rights to manage VPC/EKS; scoped to region via `Condition` |
+| `terraform.lang.security.iam.no-iam-resource-exposure` (×2) | `terraform/modules/iam-oidc/main.tf` | `ec2:*` and IAM management actions | **`# nosemgrep`** — same as above; IAM rights scoped to this pipeline's resources |
+| `terraform.lang.security.iam.no-iam-priv-esc-funcs` | `terraform/modules/iam-oidc/main.tf` | IAM role/policy management actions | **`# nosemgrep`** — Terraform must manage OIDC role, node group roles, and instance profiles |
+| `terraform.lang.security.iam.no-iam-data-exfiltration` | `terraform/modules/iam-oidc/main.tf` | S3 `GetObject`/`PutObject` actions | **`# nosemgrep`** — scoped to the specific state bucket ARN for this environment |
+| `terraform.aws.security.aws-subnet-has-public-ip-address` | `terraform/modules/vpc/main.tf` | `map_public_ip_on_launch = true` on public subnets | **`# nosemgrep`** — required for AWS NLB and NAT gateway placement |
+
+#### Checkov — 8 blocking findings (run [#24310192653](https://github.com/sandeshlamsal/Devops_AwsDevToProd_Deployment_ReleasePipeline_Tags/actions/runs/24310192653))
+
+| Check ID | Resource | Issue | Resolution |
+|---|---|---|---|
+| `CKV_AWS_37` | `aws_eks_cluster.main` | EKS control-plane logging not enabled for all 5 log types | **Fixed** — `enabled_cluster_log_types = ["api","audit","authenticator","controllerManager","scheduler"]` |
+| `CKV_AWS_58` | `aws_eks_cluster.main` | EKS secrets not encrypted at rest | **Fixed** — added `aws_kms_key` with key rotation + `encryption_config { resources = ["secrets"] }` |
+| `CKV_AWS_39` | `aws_eks_cluster.main` | EKS public API endpoint enabled | **`checkov:skip`** — GitHub Actions OIDC needs public endpoint access |
+| `CKV_AWS_38` | `aws_eks_cluster.main` | EKS public endpoint accessible to `0.0.0.0/0` | **`checkov:skip`** — GitHub Actions runners use dynamic IPs; IP restriction not feasible |
+| `CKV_AWS_130` | `aws_subnet.public` (×2) | VPC subnets assign public IPs by default | **`checkov:skip`** — public subnets require `map_public_ip_on_launch` for AWS NLB and NAT gateway |
+| `CKV2_AWS_11` | `aws_vpc.main` | VPC flow logging not enabled | **Fixed** — added `aws_flow_log` → CloudWatch log group with 30-day retention + dedicated IAM role |
+| `CKV2_AWS_12` | `aws_vpc.main` | Default security group not locked down | **Fixed** — added `aws_default_security_group` resource with no ingress/egress rules |
+
+---
+
 ## Teardown — Destroying All Resources
 
 > Everything created by this pipeline is reversible. Run teardown after end-to-end testing to avoid ongoing costs.
