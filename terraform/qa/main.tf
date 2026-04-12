@@ -46,6 +46,8 @@ module "vpc" {
   vpc_cidr           = "10.20.0.0/16"
   availability_zones = ["us-east-1a", "us-east-1b"]
   cluster_name       = local.cluster_name
+
+  depends_on = [module.iam_oidc]
 }
 
 module "eks" {
@@ -60,6 +62,8 @@ module "eks" {
   desired_nodes  = 1
   min_nodes      = 1
   max_nodes      = 3
+
+  depends_on = [module.iam_oidc]
 }
 
 module "iam_oidc" {

@@ -47,6 +47,10 @@ module "vpc" {
   vpc_cidr           = "10.10.0.0/16"
   availability_zones = ["us-east-1a", "us-east-1b"]
   cluster_name       = local.cluster_name
+
+  # IAM policy must be fully applied before VPC resources are created
+  # so that KMS and CloudWatch Logs permissions are in effect.
+  depends_on = [module.iam_oidc]
 }
 
 module "eks" {
@@ -62,6 +66,10 @@ module "eks" {
   desired_nodes  = 1
   min_nodes      = 1
   max_nodes      = 3
+
+  # IAM policy must be fully applied before EKS resources are created
+  # so that KMS and iam:CreateServiceLinkedRole permissions are in effect.
+  depends_on = [module.iam_oidc]
 }
 
 # ─── Grant GitHub Actions role kubectl access inside the cluster ──────────────
