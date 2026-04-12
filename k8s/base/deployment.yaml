@@ -24,6 +24,8 @@ spec:
         configmap-version: "v1"
     spec:
       terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: nginx
           # image tag is overwritten by kustomize edit set image
