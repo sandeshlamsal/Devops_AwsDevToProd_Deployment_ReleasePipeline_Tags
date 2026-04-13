@@ -150,8 +150,9 @@ jobs:
       - name: DAST — OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target:      ${{ steps.url.outputs.url }}
-          fail_action: false   # DEV: report only — ZAP enforced in QA/PROD
+          target:              ${{ steps.url.outputs.url }}
+          fail_action:         false   # DEV: report only — ZAP enforced in QA/PROD
+          allow_issue_writing: false   # no issues: write permission on this token
 
       # ─── Rollback if rollout or smoke test failed ───────────────────────────
       - name: Rollback on failure
