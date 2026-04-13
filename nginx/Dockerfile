@@ -20,8 +20,9 @@ RUN apk upgrade --no-cache && \
 COPY nginx.conf            /etc/nginx/nginx.conf
 COPY security-headers.conf /etc/nginx/security-headers.conf
 
-# HTML template and entrypoint
+# HTML template, stylesheet, and entrypoint
 COPY html/index.html.template /usr/share/nginx/html/index.html.template
+COPY html/style.css            /usr/share/nginx/html/style.css
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
