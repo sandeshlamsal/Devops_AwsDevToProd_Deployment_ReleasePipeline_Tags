@@ -186,17 +186,6 @@ jobs:
             s3://tfstate-nginx-release-dev-648426766457/eks/terraform.tfstate.tflock \
             --region ${{ env.AWS_REGION }} 2>/dev/null || true
 
-      # ONE-TIME migration step: EKS cluster was created at 1.29 (EOL).
-      # AWS does not support skipping minor versions, so the cluster must be
-      # destroyed and recreated at 1.34. Remove this step after the first
-      # successful apply at 1.34.
-      - name: Destroy EKS module (version migration 1.29 → 1.34)
-        run: |
-          terraform -chdir=${{ env.TF_DIR }} destroy \
-            -auto-approve \
-            -target=module.eks \
-            -no-color
-
       - name: Terraform apply
         run: |
           terraform -chdir=${{ env.TF_DIR }} apply \
