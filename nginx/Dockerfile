@@ -17,7 +17,8 @@ RUN apk upgrade --no-cache && \
     apk add --no-cache gettext curl
 
 # Nginx config
-COPY nginx.conf /etc/nginx/nginx.conf
+COPY nginx.conf            /etc/nginx/nginx.conf
+COPY security-headers.conf /etc/nginx/security-headers.conf
 
 # HTML template and entrypoint
 COPY html/index.html.template /usr/share/nginx/html/index.html.template
