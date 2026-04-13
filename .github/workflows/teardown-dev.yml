@@ -1,0 +1,119 @@
+name: DEV — Teardown (save costs)
+
+# Destroys all DEV compute resources (EKS, VPC, NAT gateway, subnets)
+# but intentionally keeps module.iam_oidc so the OIDC role and GitHub
+# Actions authentication survive — the pipeline can bring everything back
+# up the next day without any manual bootstrapping.
+#
+# To bring back up:
+#   1. Run "Terraform — DEV" workflow_dispatch with action=apply  (~15 min)
+#   2. Run "DEV — CI → Build → Deploy" workflow_dispatch            (~5 min)
+#
+# Cost saved: EKS control plane ($0.10/hr × 2 clusters = ~$4.80/day),
+#             EC2 nodes, NAT gateway, and load balancer charges stop.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DESTROY to confirm (this tears down all DEV compute)"
+        required: true
+
+env:
+  AWS_REGION:  us-east-1
+  CLUSTER:     eks-dev
+  NAMESPACE:   release-app
+  TF_DIR:      terraform/dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  teardown:
+    name: Destroy DEV compute resources
+    runs-on: ubuntu-latest
+    environment: dev
+    if: inputs.confirm == 'DESTROY'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      # ── Step 1: Delete Kubernetes resources ──────────────────────────────────
+      # Deleting the namespace removes the LoadBalancer Service, which tells
+      # AWS to delete the ELB. If we destroy the VPC first, the ELB becomes
+      # an orphaned resource and the VPC destroy fails with dependency errors.
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name   ${{ env.CLUSTER }} \
+            --region ${{ env.AWS_REGION }}
+        continue-on-error: true   # cluster may already be gone on a retry
+
+      - name: Delete Kubernetes namespace (removes ELB)
+        run: |
+          kubectl delete namespace ${{ env.NAMESPACE }} \
+            --ignore-not-found=true \
+            --timeout=120s
+        continue-on-error: true
+
+      - name: Wait for ELB to be released by AWS
+        run: sleep 60
+
+      # ── Step 2: Terraform destroy (compute only) ─────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_DIR }} init
+
+      - name: Release stale state lock (if any)
+        run: |
+          aws s3 rm \
+            s3://tfstate-nginx-release-dev-648426766457/eks/terraform.tfstate.tflock \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
+
+      - name: Destroy EKS access entries
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} destroy \
+            -auto-approve \
+            -no-color \
+            -target=aws_eks_access_policy_association.github_actions \
+            -target=aws_eks_access_entry.github_actions
+        continue-on-error: true   # may not exist if cluster was never fully created
+
+      - name: Destroy EKS cluster
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} destroy \
+            -auto-approve \
+            -no-color \
+            -target=module.eks
+
+      - name: Destroy VPC (NAT gateway, subnets, IGW)
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} destroy \
+            -auto-approve \
+            -no-color \
+            -target=module.vpc
+
+      - name: Summary
+        run: |
+          echo "### DEV compute destroyed ✓" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| EKS cluster \`eks-dev\` | Destroyed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| VPC / NAT gateway / subnets | Destroyed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| IAM OIDC role | **Kept** (needed for bring-up) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**To bring back up:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Run **Terraform — DEV** → \`action=apply\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Run **DEV — CI → Build → Deploy**" >> "$GITHUB_STEP_SUMMARY"

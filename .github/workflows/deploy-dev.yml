@@ -3,6 +3,7 @@ name: DEV — CI → Build → Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:   # manual trigger — use after terraform bring-up to deploy the app
 
 concurrency:
   group: deploy-dev
