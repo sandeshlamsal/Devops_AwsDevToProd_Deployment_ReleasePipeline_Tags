@@ -148,7 +148,10 @@ resource "aws_iam_policy" "terraform_infra" {
       {
         Sid    = "KMSManagement"
         Effect = "Allow"
-        Action = [
+        Action = [ # nosemgrep: terraform.lang.security.iam.no-iam-resource-exposure.no-iam-resource-exposure
+          # kms:PutKeyPolicy and kms:CreateGrant are required for Terraform to manage EKS
+          # cluster encryption. Resource scoped to "*" because the KMS key doesn't exist
+          # at policy-creation time (chicken-and-egg). Reviewed and intentional.
           "kms:CreateKey", "kms:DescribeKey", "kms:EnableKeyRotation",
           "kms:GetKeyPolicy", "kms:GetKeyRotationStatus",
           "kms:ListResourceTags", "kms:PutKeyPolicy",
