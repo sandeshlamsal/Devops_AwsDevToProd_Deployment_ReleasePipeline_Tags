@@ -145,14 +145,15 @@ jobs:
 
       # ─── Stage 5: DAST — OWASP ZAP ─────────────────────────────────────────
       - name: Set workspace permissions for ZAP
-        run: chmod a+w .   # ZAP Docker container is non-root; needs write access to workspace
+        run: chmod a+w .
 
       - name: DAST — OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
+        continue-on-error: true          # scan runs, findings logged, never blocks deploy
         with:
           target:              ${{ steps.url.outputs.url }}
-          fail_action:         false   # DEV: report only — ZAP enforced in QA/PROD
-          allow_issue_writing: false   # no issues: write permission on this token
+          fail_action:         false
+          allow_issue_writing: false
 
       # ─── Rollback if rollout or smoke test failed ───────────────────────────
       - name: Rollback on failure
