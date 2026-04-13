@@ -151,10 +151,8 @@ jobs:
             ${{ env.TF_DIR }}/plan-output.txt
           retention-days: 7     # plan artifacts expire — must apply within 7 days
 
-  # ─── Job 3: Approval gate then apply ──────────────────────────────────────
-  # GitHub pauses here and sends a notification to reviewers configured on
-  # the "dev-terraform" Environment (Settings → Environments → dev-terraform).
-  # Reviewer reads the plan from Job 2's summary, then clicks Approve.
+  # ─── Job 3: Apply ────────────────────────────────────────────────────────
+  # DEV applies automatically on every push to main — no approval gate.
   apply:
     name: Terraform apply — DEV
     needs: plan
@@ -162,7 +160,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
     runs-on: ubuntu-latest
-    environment: dev-terraform    # ← configure Required reviewers here
+    environment: dev
 
     steps:
       - uses: actions/checkout@v4

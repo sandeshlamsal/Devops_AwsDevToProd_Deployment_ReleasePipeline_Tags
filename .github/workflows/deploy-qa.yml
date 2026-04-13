@@ -161,11 +161,14 @@ jobs:
       - name: Smoke test
         run: ./scripts/smoke-test.sh "${{ steps.url.outputs.url }}"
 
+      - name: Set workspace permissions for ZAP
+        run: chmod a+w .   # ZAP Docker container is non-root; needs write access to workspace
+
       - name: DAST — OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target:      ${{ steps.url.outputs.url }}
-          fail_action: true    # fail the pipeline if active alerts found in QA
+          fail_action: true
 
       - name: Deployment summary
         run: |
