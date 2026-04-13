@@ -1,0 +1,113 @@
+name: DEV — Cost & Resource Inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  inventory:
+    name: Live resource inventory — DEV account
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC — DEV account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: EKS clusters
+        run: |
+          echo "## EKS Clusters" >> "$GITHUB_STEP_SUMMARY"
+          CLUSTERS=$(aws eks list-clusters --region $AWS_REGION --query 'clusters' --output text)
+          if [ -z "$CLUSTERS" ]; then
+            echo "None running (teardown complete)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            for c in $CLUSTERS; do
+              VERSION=$(aws eks describe-cluster --name "$c" --query 'cluster.version' --output text)
+              echo "- **$c** (k8s $VERSION)" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
+
+      - name: NAT Gateways
+        run: |
+          echo "## NAT Gateways" >> "$GITHUB_STEP_SUMMARY"
+          aws ec2 describe-nat-gateways \
+            --region $AWS_REGION \
+            --filter "Name=state,Values=available,pending" \
+            --query 'NatGateways[*].{ID:NatGatewayId,State:State,VPC:VpcId}' \
+            --output table >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "None" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: EC2 instances (nodes)
+        run: |
+          echo "## EC2 Instances (running)" >> "$GITHUB_STEP_SUMMARY"
+          aws ec2 describe-instances \
+            --region $AWS_REGION \
+            --filters "Name=instance-state-name,Values=running" \
+            --query 'Reservations[*].Instances[*].{ID:InstanceId,Type:InstanceType,AZ:Placement.AvailabilityZone,Lifecycle:InstanceLifecycle}' \
+            --output table >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "None" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: KMS Keys (customer-managed)
+        run: |
+          echo "## KMS Keys" >> "$GITHUB_STEP_SUMMARY"
+          aws kms list-keys --region $AWS_REGION \
+            --query 'Keys[*].KeyId' --output text | tr '\t' '\n' | while read key; do
+            META=$(aws kms describe-key --key-id "$key" --region $AWS_REGION \
+              --query 'KeyMetadata.{Desc:Description,State:KeyState,Manager:KeyManager}' \
+              --output text 2>/dev/null)
+            STATE=$(echo "$META" | awk '{print $2}')
+            MANAGER=$(echo "$META" | awk '{print $1}')
+            DESC=$(echo "$META" | cut -f3-)
+            [ "$MANAGER" = "CUSTOMER" ] && [ "$STATE" = "Enabled" ] && echo "- $DESC" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: VPCs
+        run: |
+          echo "## VPCs (non-default)" >> "$GITHUB_STEP_SUMMARY"
+          aws ec2 describe-vpcs \
+            --region $AWS_REGION \
+            --filters "Name=isDefault,Values=false" \
+            --query 'Vpcs[*].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key==`Name`]|[0].Value}' \
+            --output table >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "None" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Elastic IPs
+        run: |
+          echo "## Elastic IPs" >> "$GITHUB_STEP_SUMMARY"
+          COUNT=$(aws ec2 describe-addresses --region $AWS_REGION \
+            --query 'length(Addresses)' --output text 2>/dev/null || echo 0)
+          echo "$COUNT EIP(s) allocated (\$0.005/hr each when in use)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cost estimate summary
+        run: |
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Estimated hourly cost (running resources above)" >> "$GITHUB_STEP_SUMMARY"
+          EKS=$(aws eks list-clusters --region $AWS_REGION --query 'length(clusters)' --output text 2>/dev/null || echo 0)
+          NAT=$(aws ec2 describe-nat-gateways --region $AWS_REGION \
+            --filter "Name=state,Values=available" \
+            --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
+          EC2=$(aws ec2 describe-instances --region $AWS_REGION \
+            --filters "Name=instance-state-name,Values=running" \
+            --query 'length(Reservations[*].Instances[])' --output text 2>/dev/null || echo 0)
+          KMS=$(aws kms list-keys --region $AWS_REGION \
+            --query 'length(Keys)' --output text 2>/dev/null || echo 0)
+
+          EKS_COST=$(echo "$EKS * 0.10" | bc)
+          NAT_COST=$(echo "$NAT * 0.045" | bc)
+          EC2_COST=$(echo "$EC2 * 0.0069" | bc)   # t3.small spot approx
+          KMS_MONTHLY=$(echo "$KMS * 1" | bc)
+
+          echo "| Resource | Count | Hourly cost |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| EKS control plane | $EKS | \$$EKS_COST/hr |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| NAT Gateway | $NAT | \$$NAT_COST/hr |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| EC2 nodes (spot est.) | $EC2 | \$$EC2_COST/hr |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| KMS keys | $KMS | \$$KMS_MONTHLY/mo flat |" >> "$GITHUB_STEP_SUMMARY"
+          HOURLY=$(echo "scale=4; $EKS_COST + $NAT_COST + $EC2_COST" | bc)
+          DAILY=$(echo "scale=2; $HOURLY * 24" | bc)
+          echo "| **Total running cost** | | **\$$HOURLY/hr → \$$DAILY/day** |" >> "$GITHUB_STEP_SUMMARY"
