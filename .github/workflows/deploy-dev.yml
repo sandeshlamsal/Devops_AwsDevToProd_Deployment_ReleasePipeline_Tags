@@ -106,7 +106,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           # Patch the annotation so pods restart and pick up the new ConfigMap values
           kubectl patch deployment nginx-release -n ${{ env.NAMESPACE }} \
-            -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"configmap-version\":\"${{ github.sha }}\"}}}}}}"
+            -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"configmap-version\":\"${{ github.sha }}\"}}}}}"
 
       - name: Wait for rollout
         run: |
