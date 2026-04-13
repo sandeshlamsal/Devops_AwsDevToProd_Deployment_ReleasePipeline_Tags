@@ -816,13 +816,209 @@ Teardown brings the cost to **$0.00** — nothing runs outside the cluster.
 
 ## QA Environment Setup
 
-> _Coming soon. QA setup follows the same pattern but is triggered by `qa_*` git tags._
+QA follows the same bootstrap pattern as DEV but targets account `506250256146`. The app pipeline is gate-controlled by a git tag — no auto-deploy on push.
+
+### Prerequisites
+
+| Tool | Check |
+|---|---|
+| Terraform 1.10+ | `terraform version` |
+| AWS CLI v2 | `aws --version` |
+| QA SSO profile | `aws sts get-caller-identity --profile qa-admin` |
+
+### Step 1 — Run bootstrap (local, one-time)
+
+```bash
+AWS_PROFILE=qa-admin ./scripts/bootstrap.sh qa 506250256146
+```
+
+The script creates `tfstate-nginx-release-qa-506250256146`, runs `terraform apply -target=module.iam_oidc`, and prints the role ARN.
+
+### Step 2 — Add GitHub Secret
+
+| Secret | Value |
+|---|---|
+| `QA_IAM_ROLE_ARN` | Role ARN printed by bootstrap |
+
+### Step 3 — Create QA cluster
+
+```
+Actions → "Terraform — QA" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+Job flow:
+```
+lint-and-scan  — fmt · validate · Checkov
+    │
+    ▼
+plan           — OIDC → GitHubActionsRole-qa · terraform plan (output in summary)
+    │
+    ▼  [PAUSE — approval gate: qa-terraform environment]
+       Open the run → review plan → click Approve
+    │
+    ▼
+apply          — deploys VPC + EKS (eks-qa, t3.small spot, 1 node)
+```
+
+**Resources created (~15 min):** VPC `10.20.0.0/16`, EKS `eks-qa` (Kubernetes 1.34), SPOT node group, EKS access entry for `GitHubActionsRole-qa`.
+
+### Step 4 — Deploy app to QA
+
+Promote a DEV SHA that passed all DEV checks:
+
+```bash
+# Replace <sha> with a short SHA from a successful DEV deploy
+SHA=abc1234ef
+git tag qa_${SHA}_v1.0.0
+git push origin qa_${SHA}_v1.0.0
+```
+
+Job flow:
+```
+validate       — confirms tag format qa_<sha>_<version>
+    │
+retag          — pulls dev_<sha> from GHCR, pushes as qa_<sha>_v1.0.0
+    │            (no rebuild — exact same image that passed DEV)
+deploy         — OIDC → GitHubActionsRole-qa → eks-qa
+    ├── kustomize set image + kubectl apply
+    ├── Smoke test (6 endpoint checks)
+    └── OWASP ZAP baseline scan  ← BLOCKING in QA (fail_action: true)
+```
+
+> **ZAP note for QA:** Rule 10049 (Cache-Control) will fire unless you add a `.zap/rules.tsv`
+> suppression file. See [docs/pipeline-hardening-log.md](docs/pipeline-hardening-log.md)
+> for the exact file content and rationale.
+
+### Step 5 — Verify QA is live
+
+```bash
+curl http://<qa-nlb-hostname>/health
+curl http://<qa-nlb-hostname>/version
+# → {"version":"qa_<sha>_v1.0.0","env":"qa",...}
+```
+
+### Teardown QA
+
+```bash
+AWS_PROFILE=qa-admin ./scripts/teardown.sh qa 506250256146
+```
+
+### QA cost while running
+
+| Resource | Approx cost (us-east-1) |
+|---|---|
+| EKS control plane | ~$0.10 / hr |
+| 1× t3.small SPOT node | ~$0.005 / hr |
+| NAT gateway | ~$0.045 / hr + data |
+| NLB | ~$0.008 / hr + LCU |
+| **Total QA (running)** | **~$0.16 / hr (~$3.84 / day)** |
 
 ---
 
 ## PROD Environment Setup
 
-> _Coming soon. PROD setup follows the same pattern with stricter approval gates and auto-rollback._
+PROD targets account `429429082896`. It is doubly gated: the Terraform apply requires a human reviewer, and the app deploy requires a separate human reviewer plus a confirmed QA image in GHCR.
+
+### Prerequisites
+
+| Tool | Check |
+|---|---|
+| Terraform 1.10+ | `terraform version` |
+| AWS CLI v2 | `aws --version` |
+| PROD SSO profile | `aws sts get-caller-identity --profile prod-admin` |
+
+### Step 1 — Run bootstrap (local, one-time)
+
+```bash
+AWS_PROFILE=prod-admin ./scripts/bootstrap.sh prod 429429082896
+```
+
+Creates `tfstate-nginx-release-prod-429429082896` and prints the role ARN.
+
+### Step 2 — Add GitHub Secret
+
+| Secret | Value |
+|---|---|
+| `PROD_IAM_ROLE_ARN` | Role ARN printed by bootstrap |
+
+### Step 3 — Create PROD cluster
+
+```
+Actions → "Terraform — PROD" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+Job flow:
+```
+lint-and-scan  — fmt · validate · Checkov
+    │
+    ▼
+plan           — OIDC → GitHubActionsRole-prod · terraform plan (output in summary)
+    │
+    ▼  [PAUSE — approval gate: prod-terraform environment]
+       Open the run → review plan carefully → click Approve
+    │
+    ▼
+apply          — deploys VPC + EKS (eks-prod, t3.medium spot, 2 nodes)
+```
+
+**Resources created (~20 min):** VPC `10.30.0.0/16`, EKS `eks-prod` (Kubernetes 1.34), SPOT node group (2× t3.medium), EKS access entry for `GitHubActionsRole-prod`.
+
+### Step 4 — Deploy app to PROD
+
+PROD requires a SHA that was **already deployed to QA** — the pipeline checks GHCR for the QA image before proceeding.
+
+```bash
+# <sha> must match a qa_<sha>_v<version> tag that was successfully deployed
+SHA=abc1234ef
+git tag prod_${SHA}_v1.0.0
+git push origin prod_${SHA}_v1.0.0
+```
+
+Job flow:
+```
+validate       — confirms tag format + confirms qa_<sha>_v1.0.0 exists in GHCR
+    │
+approve        — [PAUSE — approval gate: prod environment]
+    │              Human reviewer confirms QA sign-off before proceeding
+retag          — pulls qa_<sha>_v1.0.0, pushes as prod_<sha>_v1.0.0
+    │
+deploy         — OIDC → GitHubActionsRole-prod → eks-prod
+    ├── Capture previous image tag (for rollback reference)
+    ├── kustomize set image + kubectl apply
+    ├── RollingUpdate (maxUnavailable: 0 — zero downtime)
+    ├── Smoke test
+    └── Auto-rollback → reverts to previous image if rollout or smoke fails
+```
+
+### Step 5 — Verify PROD is live
+
+```bash
+curl http://<prod-nlb-hostname>/health
+curl http://<prod-nlb-hostname>/version
+# → {"version":"prod_<sha>_v1.0.0","env":"prod",...}
+```
+
+### Teardown PROD
+
+```bash
+AWS_PROFILE=prod-admin ./scripts/teardown.sh prod 429429082896
+```
+
+> Teardown PROD only after confirmed end-of-test. Production resources should not be torn down during active use.
+
+### PROD cost while running
+
+| Resource | Approx cost (us-east-1) |
+|---|---|
+| EKS control plane | ~$0.10 / hr |
+| 2× t3.medium SPOT nodes | ~$0.015 / hr |
+| NAT gateway | ~$0.045 / hr + data |
+| NLB | ~$0.008 / hr + LCU |
+| **Total PROD (running)** | **~$0.17 / hr (~$4.10 / day)** |
 
 ---
 
@@ -1073,3 +1269,198 @@ AccessDeniedException: not authorized to perform: logs:ListTagsForResource
 ```
 
 **Files:** [.github/workflows/terraform-dev.yml](.github/workflows/terraform-dev.yml), [.github/workflows/terraform-qa.yml](.github/workflows/terraform-qa.yml), [.github/workflows/terraform-prod.yml](.github/workflows/terraform-prod.yml)
+
+---
+
+## Full Pipeline Test Run — DEV → QA → PROD
+
+Reference guide for running a complete end-to-end test across all three environments from a cold start (all compute torn down).
+
+### Prerequisites before starting
+
+- [ ] SSO session active: `aws sso login --sso-session nginx-pipeline`
+- [ ] Bootstrap completed in all 3 accounts (bootstrap.sh run once each)
+- [ ] GitHub Secrets set: `DEV_IAM_ROLE_ARN`, `QA_IAM_ROLE_ARN`, `PROD_IAM_ROLE_ARN`, `GH_PAT`
+- [ ] GitHub Environments created (run `Terraform — GitHub Environments` → apply once)
+
+> **ZAP in QA is blocking.** Rule 10049 (Cache-Control) will fire and fail the QA pipeline
+> unless `.zap/rules.tsv` is present. Add it before pushing the QA tag.
+> See [docs/pipeline-hardening-log.md](docs/pipeline-hardening-log.md) for file content.
+
+---
+
+### Phase 1 — Bring up DEV infrastructure (~20 min)
+
+```
+Actions → "Terraform — DEV" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+| Step | Time |
+|---|---|
+| Terraform lint + Checkov | 3 min |
+| IAM pre-apply + propagation wait | 2 min |
+| VPC + subnets + NAT gateway | 3 min |
+| EKS cluster creation | 12 min |
+
+Approve the `dev-terraform` environment gate when prompted.
+
+---
+
+### Phase 2 — Deploy app to DEV (~20 min)
+
+Push an empty commit to trigger the pipeline, or use workflow_dispatch:
+
+```bash
+git commit --allow-empty -m "trigger: DEV test run"
+git push origin main
+```
+
+Or: `Actions → "DEV — CI → Build → Deploy" → Run workflow`
+
+| Step | Time |
+|---|---|
+| CI (Gitleaks · Semgrep · nginx lint · unit tests) | 4 min |
+| Build + Trivy scan + GHCR push | 7 min |
+| Deploy + rollout + smoke test | 5 min |
+| ZAP DAST (report only — non-blocking in DEV) | 5 min |
+
+Approve the `dev` environment gate when prompted. Note the `dev_<sha>_v<N>` tag from the job summary — you will need the `<sha>` portion for Phases 4 and 6.
+
+---
+
+### Phase 3 — Bring up QA infrastructure (~25 min)
+
+```
+Actions → "Terraform — QA" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+Same flow as DEV terraform. Approve the `qa-terraform` environment gate when prompted.
+
+---
+
+### Phase 4 — Deploy app to QA (~20 min)
+
+Use the `<sha>` captured from Phase 2:
+
+```bash
+SHA=<sha-from-dev-deploy>      # e.g. abc1234ef
+git tag qa_${SHA}_v1.0.0
+git push origin qa_${SHA}_v1.0.0
+```
+
+| Step | Time |
+|---|---|
+| Validate tag + re-tag DEV image as QA | 3 min |
+| Deploy + rollout | 8 min |
+| Smoke test | 2 min |
+| ZAP DAST (BLOCKING — fail_action: true) | 7 min |
+
+> If ZAP blocks here, add `.zap/rules.tsv` with rule 10049 suppressed, push to main, then re-tag.
+
+---
+
+### Phase 5 — Bring up PROD infrastructure (~25 min)
+
+```
+Actions → "Terraform — PROD" → Run workflow
+  Branch: main
+  Action: apply
+```
+
+Approve the `prod-terraform` environment gate. PROD creates 2× t3.medium SPOT nodes for HA.
+
+---
+
+### Phase 6 — Deploy app to PROD (~25 min)
+
+PROD validates that the SHA was deployed to QA before proceeding:
+
+```bash
+SHA=<same-sha-as-qa-deploy>
+git tag prod_${SHA}_v1.0.0
+git push origin prod_${SHA}_v1.0.0
+```
+
+| Step | Time |
+|---|---|
+| Validate tag + confirm QA image in GHCR | 2 min |
+| Manual approval gate (`prod` environment) | waits for human |
+| Re-tag QA image as PROD | 2 min |
+| Deploy + rollout + smoke test | 15 min |
+| Auto-rollback (if rollout or smoke fails) | automatic |
+
+---
+
+### Complete timeline summary
+
+| Phase | Action | Active Pipeline | Human Wait |
+|---|---|---|---|
+| 1 | DEV Terraform | ~20 min | Approve `dev-terraform` gate |
+| 2 | DEV Deploy | ~20 min | Approve `dev` gate |
+| 3 | QA Terraform | ~25 min | Approve `qa-terraform` gate |
+| 4 | QA Deploy | ~20 min | — |
+| 5 | PROD Terraform | ~25 min | Approve `prod-terraform` gate |
+| 6 | PROD Deploy | ~25 min | Approve `prod` gate |
+| **Total** | | **~2.5 hrs running** | **~3–4 hrs wall clock** |
+
+---
+
+### AWS cost estimate — one full test day
+
+Assumes all 3 environments are up for ~8 hours, then torn down.
+
+| Resource | DEV | QA | PROD | 8-hr total |
+|---|---|---|---|---|
+| EKS control plane ($0.10/hr) | $0.80 | $0.80 | $0.80 | **$2.40** |
+| NAT gateway ($0.045/hr) | $0.36 | $0.36 | $0.36 | **$1.08** |
+| NLB / Classic ELB ($0.023/hr) | $0.18 | $0.18 | $0.18 | **$0.55** |
+| EC2 SPOT nodes | $0.06 | $0.06 | $0.12 | **$0.24** |
+| S3 + data transfer | — | — | — | **~$0.10** |
+| **Per-env 8-hr subtotal** | **~$1.40** | **~$1.40** | **~$1.46** | |
+| **Grand total (3 envs × 8 hr)** | | | | **~$4.30** |
+
+After teardown (all compute destroyed): **$0.00/day**. Only the S3 state buckets remain at <$0.01/month each.
+
+#### Cost by scenario
+
+| Scenario | Estimated cost |
+|---|---|
+| Full test — all 3 envs for 8 hrs, then teardown | ~$4.30 |
+| DEV only (overnight, no teardown) | ~$3.84/day |
+| QA only (overnight, no teardown) | ~$3.84/day |
+| PROD only (overnight, no teardown) | ~$4.10/day |
+| All 3 running 24 hrs (no teardown) | ~$13/day |
+| All compute torn down (IAM/OIDC kept) | $0.00/day |
+
+> **EKS Extended Support warning:** Kubernetes versions past their standard support window incur
+> an additional $0.60/hr per cluster. Always run Kubernetes 1.34 (current standard support) to
+> avoid this charge. Check the [EKS Kubernetes release calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html)
+> before provisioning.
+
+---
+
+### Post-test teardown order
+
+Run teardown in reverse order (PROD → QA → DEV) to avoid confusion:
+
+```bash
+# PROD
+AWS_PROFILE=prod-admin ./scripts/teardown.sh prod 429429082896
+
+# QA
+AWS_PROFILE=qa-admin ./scripts/teardown.sh qa 506250256146
+
+# DEV
+AWS_PROFILE=dev-admin ./scripts/teardown.sh dev 648426766457
+```
+
+Or use the GitHub Actions workflow for DEV (keeps IAM/OIDC intact):
+
+```
+Actions → "DEV — Teardown (save costs)" → Run workflow
+  confirm: DESTROY
+```
