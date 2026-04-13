@@ -28,68 +28,78 @@ permissions:
   contents: read
 
 jobs:
-  scale:
-    name: "${{ inputs.action }} — ${{ inputs.environment }}"
+  # ── DEV ──────────────────────────────────────────────────────────────────────
+  scale-dev:
+    name: "${{ inputs.action }} — dev"
+    if: inputs.environment == 'dev' || inputs.environment == 'both'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - env: dev
-            cluster:    eks-dev
-            nodegroup:  eks-dev-spot
-            role_secret: DEV_IAM_ROLE_ARN
-          - env: qa
-            cluster:    eks-qa
-            nodegroup:  eks-qa-spot
-            role_secret: QA_IAM_ROLE_ARN
-      fail-fast: false
-
-    # Run only the selected environment(s)
-    if: inputs.environment == matrix.env || inputs.environment == 'both'
 
     steps:
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC — DEV)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets[matrix.role_secret] }}
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
 
-      - name: Set scaling config
-        id: cfg
+      - name: Scale eks-dev-spot (${{ inputs.action }})
         run: |
           if [[ "${{ inputs.action }}" == "pause" ]]; then
-            echo "desired=0" >> "$GITHUB_OUTPUT"
-            echo "min=0"     >> "$GITHUB_OUTPUT"
+            DESIRED=0; MIN=0
           else
-            echo "desired=1" >> "$GITHUB_OUTPUT"
-            echo "min=1"     >> "$GITHUB_OUTPUT"
+            DESIRED=1; MIN=1
           fi
 
-      - name: Scale node group (${{ inputs.action }})
-        run: |
           aws eks update-nodegroup-config \
-            --cluster-name  ${{ matrix.cluster }} \
-            --nodegroup-name ${{ matrix.nodegroup }} \
-            --scaling-config \
-              minSize=${{ steps.cfg.outputs.min }},maxSize=3,desiredSize=${{ steps.cfg.outputs.desired }} \
+            --cluster-name   eks-dev \
+            --nodegroup-name eks-dev-spot \
+            --scaling-config minSize=${MIN},maxSize=3,desiredSize=${DESIRED} \
             --region ${{ env.AWS_REGION }}
 
-          echo "Waiting for node group update to complete..."
+          echo "Waiting for node group to become active..."
           aws eks wait nodegroup-active \
-            --cluster-name   ${{ matrix.cluster }} \
-            --nodegroup-name ${{ matrix.nodegroup }} \
+            --cluster-name   eks-dev \
+            --nodegroup-name eks-dev-spot \
             --region         ${{ env.AWS_REGION }}
 
-      - name: Summary
+          echo "### eks-dev — ${{ inputs.action }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Desired nodes: ${DESIRED}" >> "$GITHUB_STEP_SUMMARY"
+          [[ "${{ inputs.action }}" == "pause" ]] && \
+            echo "> Control plane still runs at \$0.10/hr. Use teardown-dev for zero cost." >> "$GITHUB_STEP_SUMMARY" || true
+
+  # ── QA ───────────────────────────────────────────────────────────────────────
+  scale-qa:
+    name: "${{ inputs.action }} — qa"
+    if: inputs.environment == 'qa' || inputs.environment == 'both'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC — QA)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.QA_IAM_ROLE_ARN }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Scale eks-qa-spot (${{ inputs.action }})
         run: |
-          STATUS=$([[ "${{ inputs.action }}" == "pause" ]] && echo "paused (0 nodes)" || echo "resumed (1 node)")
-          echo "### ${{ matrix.cluster }} — ${STATUS}" >> "$GITHUB_STEP_SUMMARY"
-          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Cluster | \`${{ matrix.cluster }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Node group | \`${{ matrix.nodegroup }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Desired nodes | ${{ steps.cfg.outputs.desired }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ inputs.action }}" == "pause" ]]; then
-            echo "> Control plane still runs at \$0.10/hr. To stop completely, run Terraform destroy." >> "$GITHUB_STEP_SUMMARY"
+            DESIRED=0; MIN=0
+          else
+            DESIRED=1; MIN=1
           fi
+
+          aws eks update-nodegroup-config \
+            --cluster-name   eks-qa \
+            --nodegroup-name eks-qa-spot \
+            --scaling-config minSize=${MIN},maxSize=3,desiredSize=${DESIRED} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Waiting for node group to become active..."
+          aws eks wait nodegroup-active \
+            --cluster-name   eks-qa \
+            --nodegroup-name eks-qa-spot \
+            --region         ${{ env.AWS_REGION }}
+
+          echo "### eks-qa — ${{ inputs.action }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Desired nodes: ${DESIRED}" >> "$GITHUB_STEP_SUMMARY"
+          [[ "${{ inputs.action }}" == "pause" ]] && \
+            echo "> Control plane still runs at \$0.10/hr." >> "$GITHUB_STEP_SUMMARY" || true
