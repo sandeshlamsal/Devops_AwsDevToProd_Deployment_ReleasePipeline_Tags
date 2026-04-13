@@ -135,8 +135,9 @@ jobs:
       - name: DAST — OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target:      ${{ steps.url.outputs.url }}
-          fail_action: false   # report only in DEV; set true in QA/PROD
+          target:               ${{ steps.url.outputs.url }}
+          fail_action:          false   # report only in DEV; set true in QA/PROD
+          allow_issue_writing:  false   # avoids PermissionError writing zap.yaml to workspace
 
       - name: Deployment summary
         run: |
