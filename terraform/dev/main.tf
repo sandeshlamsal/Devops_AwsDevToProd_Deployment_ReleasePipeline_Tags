@@ -89,8 +89,7 @@ resource "aws_eks_access_policy_association" "github_actions" {
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
 
   access_scope {
-    type       = "namespace"
-    namespaces = ["release-app"]
+    type = "cluster"
   }
 
   depends_on = [aws_eks_access_entry.github_actions]
