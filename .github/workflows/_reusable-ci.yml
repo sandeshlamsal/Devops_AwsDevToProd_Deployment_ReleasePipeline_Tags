@@ -49,6 +49,7 @@ jobs:
         run: |
           docker run --rm \
             -v "${{ github.workspace }}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            -v "${{ github.workspace }}/nginx/security-headers.conf:/etc/nginx/security-headers.conf:ro" \
             nginx:1.27-alpine nginx -t
 
       # ── Unit tests ────────────────────────────────────────────────────────────
