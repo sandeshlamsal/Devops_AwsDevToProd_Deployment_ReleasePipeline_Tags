@@ -77,6 +77,14 @@ jobs:
             -n ${{ env.NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Capture previous image (for rollback)
+        id: prev
+        run: |
+          PREV=$(kubectl get deployment nginx-release -n ${{ env.NAMESPACE }} \
+                   -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "none")
+          echo "image=${PREV}" >> "$GITHUB_OUTPUT"
+        continue-on-error: true   # first deploy won't have a previous image
+
       - name: Set image tag in kustomize overlay
         env:
           IMAGE_TAG: "dev_${{ github.sha }}_v${{ github.run_number }}"
@@ -109,10 +117,12 @@ jobs:
             -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"configmap-version\":\"${{ github.sha }}\"}}}}}"
 
       - name: Wait for rollout
+        id: rollout
         run: |
           kubectl rollout status deployment/nginx-release \
             -n ${{ env.NAMESPACE }} \
             --timeout=300s
+        continue-on-error: true   # catch failure to trigger rollback
 
       - name: Get service URL
         id: url
@@ -129,15 +139,32 @@ jobs:
 
       # ─── Stage 4: Smoke test ────────────────────────────────────────────────
       - name: Smoke test
+        id: smoke
         run: ./scripts/smoke-test.sh "${{ steps.url.outputs.url }}"
+        continue-on-error: true
 
       # ─── Stage 5: DAST — OWASP ZAP ─────────────────────────────────────────
       - name: DAST — OWASP ZAP baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target:               ${{ steps.url.outputs.url }}
-          fail_action:          false   # report only in DEV; set true in QA/PROD
-          allow_issue_writing:  false   # avoids PermissionError writing zap.yaml to workspace
+          target:      ${{ steps.url.outputs.url }}
+          fail_action: true
+
+      # ─── Rollback if rollout or smoke test failed ───────────────────────────
+      - name: Rollback on failure
+        if: steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure'
+        env:
+          PREV_IMAGE: ${{ steps.prev.outputs.image }}
+        run: |
+          echo "::error::DEV deploy or smoke test failed — rolling back to ${PREV_IMAGE}"
+          ./scripts/rollback.sh \
+            "${{ env.NAMESPACE }}" \
+            "nginx-release" \
+            "${PREV_IMAGE}"
+
+      - name: Fail pipeline if rollback triggered
+        if: steps.rollout.outcome == 'failure' || steps.smoke.outcome == 'failure'
+        run: exit 1
 
       - name: Deployment summary
         run: |
