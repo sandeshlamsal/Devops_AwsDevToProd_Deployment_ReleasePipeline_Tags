@@ -87,7 +87,13 @@ jobs:
           kustomize edit set image \
             "ghcr.io/PLACEHOLDER/nginx-release=ghcr.io/${REPO_LOWER}/nginx-release:${IMAGE_TAG}"
 
+      - name: Apply manifests
+        run: kubectl apply -k ${{ env.OVERLAY }}
+
       - name: Update ConfigMap with version info
+        # Must run AFTER kubectl apply -k — the kustomize base includes configmap.yaml
+        # with placeholder "unknown" values. Applying the overlay first, then
+        # overwriting the ConfigMap here ensures pods see real version metadata.
         env:
           IMAGE_TAG: "dev_${{ github.sha }}_v${{ github.run_number }}"
         run: |
@@ -98,9 +104,9 @@ jobs:
             --from-literal=BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -n ${{ env.NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Apply manifests
-        run: kubectl apply -k ${{ env.OVERLAY }}
+          # Patch the annotation so pods restart and pick up the new ConfigMap values
+          kubectl patch deployment nginx-release -n ${{ env.NAMESPACE }} \
+            -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"configmap-version\":\"${{ github.sha }}\"}}}}}}"
 
       - name: Wait for rollout
         run: |

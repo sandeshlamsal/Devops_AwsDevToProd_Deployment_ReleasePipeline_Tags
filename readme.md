@@ -574,7 +574,7 @@ plan            — OIDC → GitHubActionsRole-dev · terraform plan
     ▼
 apply           — downloads the saved plan artifact · terraform apply
                   (no re-plan — zero drift between what was reviewed and what runs)
-```
+ ```
 
 **Resources created (~15 min):**
 
