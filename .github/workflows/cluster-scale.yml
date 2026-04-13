@@ -1,0 +1,95 @@
+name: Cluster — Pause / Resume
+
+# One-click scale EKS node groups to 0 (pause) or 1 (resume).
+# Saves ~80% of daily compute cost when clusters are idle.
+#
+# Cost impact (us-east-1, spot t3.small):
+#   Pause  → stops EC2 nodes; control plane still runs ($0.10/hr each)
+#   Resume → nodes back in ~2 min; next deploy works normally
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which cluster(s) to scale"
+        required: true
+        type: choice
+        options: [dev, qa, both]
+      action:
+        description: "Pause (scale to 0) or Resume (scale to 1)"
+        required: true
+        type: choice
+        options: [pause, resume]
+
+env:
+  AWS_REGION: us-east-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  scale:
+    name: "${{ inputs.action }} — ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - env: dev
+            cluster:    eks-dev
+            nodegroup:  eks-dev-spot
+            role_secret: DEV_IAM_ROLE_ARN
+          - env: qa
+            cluster:    eks-qa
+            nodegroup:  eks-qa-spot
+            role_secret: QA_IAM_ROLE_ARN
+      fail-fast: false
+
+    # Run only the selected environment(s)
+    if: inputs.environment == matrix.env || inputs.environment == 'both'
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[matrix.role_secret] }}
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Set scaling config
+        id: cfg
+        run: |
+          if [[ "${{ inputs.action }}" == "pause" ]]; then
+            echo "desired=0" >> "$GITHUB_OUTPUT"
+            echo "min=0"     >> "$GITHUB_OUTPUT"
+          else
+            echo "desired=1" >> "$GITHUB_OUTPUT"
+            echo "min=1"     >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scale node group (${{ inputs.action }})
+        run: |
+          aws eks update-nodegroup-config \
+            --cluster-name  ${{ matrix.cluster }} \
+            --nodegroup-name ${{ matrix.nodegroup }} \
+            --scaling-config \
+              minSize=${{ steps.cfg.outputs.min }},maxSize=3,desiredSize=${{ steps.cfg.outputs.desired }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Waiting for node group update to complete..."
+          aws eks wait nodegroup-active \
+            --cluster-name   ${{ matrix.cluster }} \
+            --nodegroup-name ${{ matrix.nodegroup }} \
+            --region         ${{ env.AWS_REGION }}
+
+      - name: Summary
+        run: |
+          STATUS=$([[ "${{ inputs.action }}" == "pause" ]] && echo "paused (0 nodes)" || echo "resumed (1 node)")
+          echo "### ${{ matrix.cluster }} — ${STATUS}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cluster | \`${{ matrix.cluster }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Node group | \`${{ matrix.nodegroup }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Desired nodes | ${{ steps.cfg.outputs.desired }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ inputs.action }}" == "pause" ]]; then
+            echo "> Control plane still runs at \$0.10/hr. To stop completely, run Terraform destroy." >> "$GITHUB_STEP_SUMMARY"
+          fi
